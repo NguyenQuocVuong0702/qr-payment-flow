@@ -1,12 +1,15 @@
-# QR Payment Flow — Giai đoạn 1
+# QR Payment Flow — B1 và B2
 
 Ứng dụng bài tập Java 21, Spring Boot 3.5.16, Maven 3.9.16, H2.
-Hiện đã triển khai **B1: Merchant tạo đơn hàng**. B2–B8 mới có thiết kế.
+Đã triển khai **B1: tạo đơn hàng** và **B2: Gateway tạo giao dịch, sinh QR động**.
+B3–B8 chưa triển khai.
 
 - [Đề bài chính thức](bai-tap-luong-thanh-toan-qr.md)
 - [Phân tích B1–B8, mô hình dữ liệu, transaction và các quyết định](docs/architecture.md)
 - [Request chạy thử B1](requests/b1.http)
 - [Báo cáo giai đoạn 1 và kết quả kiểm chứng thực tế](docs/phase1-report.md)
+- [Báo cáo B2, quyết định kỹ thuật và kết quả kiểm chứng](docs/phase2-report.md)
+- [Request B2](requests/b2.http)
 
 ## Cấu trúc
 
@@ -17,30 +20,43 @@ pom.xml
 src/main/java/vn/vnpay/qr/
   QrPaymentApplication.java
   common/config/                      Clock, RestClient builder, JSON strict
+  common/crypto/                      Canonicalization và HMAC-SHA256
   common/error/                       Error envelope và advice
   merchant/
     api/                              Controller và request/response DTO
-    config/                           merchantId cục bộ MC001
+    client/                           RestClient và DTO riêng phía Merchant
+    config/                           MC001, URL và secret Gateway cục bộ
     domain/                           Order, OrderStatus
     repository/                       JPA repository, sequence cấp orderId
-    service/                          Transaction tạo đơn
-  gateway/package-info.java           Ranh giới cho giai đoạn sau
+    service/                          B1; điều phối B2 và transaction đọc/lưu riêng
+  gateway/
+    api/                              POST payments, ký response
+    domain/                           Merchant registry, PaymentTxn, PaymentStatus
+    repository/                       Các repository chỉ Gateway sử dụng
+    service/                          Tạo/replay và phục hồi unique-key race
+    qr/                               TLV động, CRC-16/CCITT-FALSE
   wallet/package-info.java            Ranh giới cho giai đoạn sau
 src/main/resources/
   application.yml
   application-dev.yml                 H2 file, H2 console local
-  schema.sql                          Chỉ orders + sequence của B1
+  schema.sql                          orders, merchant, payment_txn, hai sequence
+  data.sql                            Seed MC001 nếu chưa tồn tại
 src/test/java/vn/vnpay/qr/
   ApplicationContextTest.java
   merchant/OrderApiIntegrationTest.java
+  merchant/MerchantPaymentHttpIntegrationTest.java
+  gateway/CryptoAndQrTest.java
+  gateway/GatewayPaymentApiIntegrationTest.java
+  gateway/QrParserCompatibilityIT.java Kiểm tra ngoài qua API qr-parser gốc
 src/test/resources/application-test.yml
 docs/architecture.md
 requests/b1.http
+requests/b2.http
 ```
 
-Các thành phần giao tiếp qua HTTP khi B2 trở đi được triển khai. Bank sẽ nằm trong
-Gateway và dùng chung transaction cơ sở dữ liệu. Không có bảng, endpoint hay seed
-Gateway/Wallet/Bank trong phiên bản B1.
+Merchant → Gateway hiện gọi qua HTTP thật, không import service/repository/entity
+của nhau. Bank sẽ nằm trong Gateway và dùng chung transaction cơ sở dữ liệu ở B5;
+chưa có Bank, account, ledger, wallet_user hoặc IPN.
 
 ## Chạy
 
@@ -65,6 +81,12 @@ chế độ ghi trễ mặc định nếu tiến trình bị dừng đột ngộ
 H2 console: `http://localhost:8080/h2-console`, JDBC URL
 `jdbc:h2:file:./data/qr-payment`, user `sa`, password mặc định rỗng cho dev local.
 Có thể đặt `QR_DB_PASSWORD` trước lần tạo DB đầu tiên. Không bật console cho truy cập từ xa.
+
+Merchant dùng `QR_GATEWAY_BASE_URL` (mặc định `http://localhost:${server.port}`) và
+`QR_MERCHANT_SECRET` (mặc định secret giả lập `secret-mc001`). Registry MC001 có secret
+mẫu theo đề; khi thay secret cần cập nhật cả hai phía. Seed chỉ insert khi thiếu,
+không ghi đè registry đã có. Với `server.port=0`, cấu hình URL Gateway rõ ràng sau khi
+biết cổng thật; dev thông thường dùng cổng cố định 8080.
 
 ## API B1
 
@@ -124,6 +146,103 @@ riêng, không tự retry B1 sau timeout. Không gộp đơn theo amount/descrip
 giới hạn idempotency này và kế hoạch B2/B5 ở tài liệu thiết kế. B1 không gọi Gateway
 và không tạo QR. `GET /api/merchant/orders/{orderId}` thuộc B7, chưa có.
 
+## API B2 và luồng Merchant → Gateway → Merchant
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant M as Merchant
+    participant G as Gateway
+    C->>M: POST /orders (B1)
+    M-->>C: 201 CREATED + orderId
+    C->>M: POST /orders/{orderId}/payments, expireMinutes
+    M->>M: Đọc đơn trong transaction ngắn, kết thúc transaction
+    M->>G: HTTP POST /api/gateway/payments + HMAC
+    G->>G: Xác thực, tạo/replay payment_txn, commit
+    G-->>M: 201 PENDING + QR, X-Signature
+    M->>M: Verify response; transaction lưu txnRef + WAITING_PAYMENT
+    M-->>C: 201 với cùng dữ liệu Gateway
+```
+
+### Kích hoạt từ Merchant
+
+`POST /api/merchant/orders/{orderId}/payments`
+
+```json
+{"expireMinutes":15}
+```
+
+Chỉ nhận expireMinutes từ 1 đến 60. Amount, description và merchantId lấy từ đơn
+đã lưu. Body có thêm amount/description hoặc trường lạ bị từ chối; không thay đổi B1.
+
+PowerShell, sau khi ứng dụng đang chạy:
+
+```powershell
+$order = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/merchant/orders `
+  -ContentType application/json -Body '{"amount":55000,"description":"Thanh toan ao thun"}'
+$payment = Invoke-RestMethod -Method Post `
+  -Uri "http://localhost:8080/api/merchant/orders/$($order.orderId)/payments" `
+  -ContentType application/json -Body '{"expireMinutes":15}'
+$payment
+```
+
+### API Gateway theo đề
+
+`POST /api/gateway/payments`
+
+```json
+{
+  "merchantId":"MC001",
+  "orderId":"ORD20261102001",
+  "amount":55000,
+  "description":"Thanh toan ao thun",
+  "expireMinutes":15,
+  "signature":"bdda985548c27afd42ef3b29e6b868b767e1926e54ae52989e197321321e03ff"
+}
+```
+
+Signature trên dành đúng body ví dụ và secret mẫu. Bỏ signature, sort key tăng dần,
+nối `key=value` bằng `&`, giữ nguyên dấu cách, UTF-8 rồi HMAC-SHA256 lowercase hex.
+Merchant tự tính chữ ký khi gọi endpoint kích hoạt phía trên.
+
+Cả hai endpoint B2 trả **201 Created**, ví dụ minh họa với thời gian/sequence cố định:
+
+```json
+{
+  "txnRef":"TX00000001",
+  "orderId":"ORD20261102001",
+  "amount":55000,
+  "status":"PENDING",
+  "expireAt":"2026-11-02T09:15:00+07:00",
+  "qrString":"00020101021226230010A0000007750105MC0015204549953037045405550005802VN5908SHOP ABC6005HANOI62530522012611020915TX000000010818Thanh toan ao thun0901M6304C9E9"
+}
+```
+
+Gateway thêm header `X-Signature` ký toàn bộ response JSON. Merchant phải verify trước
+khi cập nhật đơn. Lỗi có body parse được và merchant đã đăng ký cũng được ký; lỗi
+JSON chưa parse được hoặc merchant không tồn tại không thể ký bằng secret của merchant.
+Merchant coi response thiếu/sai chữ ký là không đáng tin và không cập nhật đơn.
+
+| Tình huống B2 | HTTP / mã hoặc hành vi |
+|---|---|
+| Đúng request | 201, PENDING, txnRef/QR/hạn thanh toán |
+| Cùng merchantId/orderId và amount | 201, trả nguyên giao dịch cũ, không đổi QR/hạn |
+| Cùng merchantId/orderId, khác amount | 409 ORDER_CONFLICT |
+| Merchant chưa đăng ký | 404 MERCHANT_NOT_FOUND tại Gateway |
+| Signature thiếu/sai | 401 INVALID_SIGNATURE |
+| Amount/description sai | 400 INVALID_AMOUNT / INVALID_DESCRIPTION |
+| expireMinutes thiếu/sai kiểu/ngoài 1–60 | 400 INVALID_EXPIRE_MINUTES |
+| Identifier hoặc trường lạ không hợp lệ | 400 INVALID_REQUEST |
+| Không tìm thấy đơn phía Merchant | 404 ORDER_NOT_FOUND |
+| Mất kết nối/không biết Gateway đã commit chưa | Merchant trả 502 GATEWAY_UNAVAILABLE |
+| Response Gateway hỏng, thiếu/sai HMAC hoặc không khớp đơn | Merchant trả 502 INVALID_GATEWAY_RESPONSE |
+
+Nếu Gateway đã commit nhưng Merchant mất response hoặc lưu đơn thất bại, gọi lại
+**endpoint payments với cùng orderId**. Gateway trả txnRef cũ và Merchant cập nhật lại
+trong transaction ngắn. Không tạo lại B1 để retry B2. Thay description/expireMinutes
+của request replay không cập nhật giao dịch cũ. B2 chưa chạy job hết hạn; replay cũng
+không gia hạn hoặc tự tạo giao dịch mới.
+
 ## Kiểm thử
 
 ```powershell
@@ -134,16 +253,29 @@ và không tạo QR. `GET /api/merchant/orders/{orderId}` thuộc B7, chưa có.
 sh mvnw test
 ```
 
-Test tự chọn profile `test`, H2 memory tách khỏi H2 file dev; dùng fixed Clock,
-không bọc test HTTP trong transaction để xác nhận việc commit thật. Test kiểm tra
-biên/kiểu dữ liệu, response và persistence, rollback sau INSERT, ràng buộc DB và
-12 request tạo đơn đồng thời. Báo cáo máy đọc được ở `target/surefire-reports/`.
-12 kịch bản B1–B8 trong đề chưa thuộc kết quả của giai đoạn 1.
+Test tự chọn profile `test`, dùng H2 memory riêng và fixed Clock khi kiểm thời gian.
+Không bọc test HTTP trong transaction. Test B2 có Gateway HTTP thật và proxy thử lỗi
+để kiểm mất response sau commit, lỗi lưu Merchant, response hỏng và concurrency.
+`mvnw test` chạy 117 test trong ứng dụng; kiểm tra qr-parser ngoài được tách thành
+`QrParserCompatibilityIT`, phải khởi động project gốc để chạy, không âm thầm skip.
 
-Kết quả kiểm chứng ngày 2026-11-09: **66 test, 0 failures, 0 errors, 0 skipped**;
-đóng gói JAR thành công. Smoke test HTTP thật và H2 file qua hai lần dừng tiến trình
-đột ngột xác nhận giữ được 2 đơn đã commit, tổng 56.000 VND, mã đơn không trùng.
-Chi tiết lệnh và bằng chứng ở [báo cáo giai đoạn 1](docs/phase1-report.md).
+Kiểm tra Type04 bằng project gốc trong terminal khác, từ thư mục qr-parser chứa pom.xml:
+
+```powershell
+.\mvnw.cmd package
+java -jar target/qr-parser-0.0.1-SNAPSHOT.jar --server.port=8081
+```
+
+Tại qr-payment-flow, chạy **toàn bộ B1+B2 kèm kiểm chứng Type04**:
+
+```powershell
+.\mvnw.cmd "-Dtest=*Test,*IT" "-Dqr.parser.url=http://localhost:8081" test package
+```
+
+Kết quả thực tế ngày 2026-11-09: **118 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
+66 test B1 và 52 test B2. `qr-parser` gốc trả HTTP 200, `status=VALID`, CRC VALID cho
+QR thực sự sinh bởi Gateway với `type="04"`. JAR đóng gói thành công. Đây chưa phải
+toàn bộ 12 kịch bản end-to-end B1–B8. Xem [báo cáo B2](docs/phase2-report.md).
 
 Môi trường triển khai hiện tại giới hạn ghi ngoài workspace, nên lệnh kiểm chứng dùng
 cache cục bộ (không thay đổi cấu hình Maven của người dùng):
@@ -158,9 +290,8 @@ chính thức đã được tải bằng Python HTTPS, kiểm SHA-512 của Mave
 trong wrapper properties, rồi nạp vào cache cục bộ. Các lần test sau vẫn chạy qua
 `mvnw.cmd`; không tắt kiểm chứng TLS hoặc checksum, không sửa script Wrapper.
 
-## Tiếp theo
+## Phạm vi còn lại
 
-B2: Gateway registry/payment_txn, HMAC, TLV, CRC, HTTP từ Merchant, replay/order
-conflict và kiểm QR Type04. Chưa triển khai scan, PIN, chuyển tiền, IPN, tra cứu,
-job hết hạn, đối soát hoặc hoàn tiền. Workspace ban đầu chưa là Git repository;
-giai đoạn này không tự tạo Git history/commit.
+Dừng tại B2. Chưa triển khai B3–B8: scan, PIN, khóa PIN, chuyển tiền, IPN, tra cứu,
+job hết hạn, đối soát hoặc hoàn tiền. Không có tự động retry nền phía Merchant;
+client gọi lại payments với cùng orderId để khôi phục. Git đã lưu riêng mốc B1 và B2.

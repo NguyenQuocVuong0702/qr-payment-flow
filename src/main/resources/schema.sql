@@ -17,3 +17,42 @@ CREATE TABLE IF NOT EXISTS orders (
     CONSTRAINT ck_orders_status CHECK (
         status IN ('CREATED', 'WAITING_PAYMENT', 'PAID', 'PAYMENT_FAILED', 'EXPIRED'))
 );
+
+CREATE TABLE IF NOT EXISTS merchant (
+    merchant_id VARCHAR(13) PRIMARY KEY,
+    name VARCHAR(25) NOT NULL,
+    city VARCHAR(15) NOT NULL,
+    mcc VARCHAR(4) NOT NULL,
+    secret_key VARCHAR(128) NOT NULL,
+    ipn_url VARCHAR(255) NOT NULL,
+    account_no VARCHAR(32) NOT NULL
+);
+
+-- Fixed TX + eight digits keeps 62/05 within the original Type 04 limit of 25 characters.
+CREATE SEQUENCE IF NOT EXISTS gateway_txn_seq START WITH 1 INCREMENT BY 1 MAXVALUE 99999999 NO CYCLE;
+
+CREATE TABLE IF NOT EXISTS payment_txn (
+    txn_ref VARCHAR(10) PRIMARY KEY,
+    merchant_id VARCHAR(13) NOT NULL,
+    order_id VARCHAR(32) NOT NULL,
+    amount BIGINT NOT NULL,
+    description VARCHAR(19) NOT NULL,
+    status VARCHAR(24) NOT NULL,
+    qr_string VARCHAR(512) NOT NULL,
+    expire_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+    payer_account VARCHAR(32),
+    bank_ref VARCHAR(32),
+    fail_reason VARCHAR(64),
+    created_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+    paid_at TIMESTAMP(6) WITH TIME ZONE,
+    version BIGINT NOT NULL,
+    CONSTRAINT fk_payment_merchant FOREIGN KEY (merchant_id) REFERENCES merchant(merchant_id),
+    CONSTRAINT uk_payment_order UNIQUE (merchant_id, order_id),
+    CONSTRAINT uk_payment_bank_ref UNIQUE (bank_ref),
+    CONSTRAINT ck_payment_amount CHECK (amount BETWEEN 1000 AND 500000000),
+    CONSTRAINT ck_payment_description CHECK (
+        CHAR_LENGTH(TRIM(description)) > 0 AND NOT REGEXP_LIKE(description, '[^A-Za-z0-9 ]')),
+    CONSTRAINT ck_payment_status CHECK (
+        status IN ('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'EXPIRED', 'REFUNDED')),
+    CONSTRAINT ck_payment_expiry CHECK (expire_at > created_at)
+);

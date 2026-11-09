@@ -56,6 +56,18 @@ public class Order {
     }
 
     public String getOrderId() { return orderId; }
+
+    public void attachPayment(String txnRef) {
+        if (status == OrderStatus.WAITING_PAYMENT && txnRef.equals(this.txnRef)) {
+            return;
+        }
+        if (status != OrderStatus.CREATED || this.txnRef != null) {
+            throw new vn.vnpay.qr.common.error.ApiException(org.springframework.http.HttpStatus.CONFLICT,
+                    "ORDER_CONFLICT", "Order is already linked to another payment or state");
+        }
+        this.txnRef = txnRef;
+        this.status = OrderStatus.WAITING_PAYMENT;
+    }
     public String getMerchantId() { return merchantId; }
     public long getAmount() { return amount; }
     public String getDescription() { return description; }

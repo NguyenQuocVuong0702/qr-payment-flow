@@ -4,6 +4,6 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-@EnableConfigurationProperties(MerchantProperties.class)
+@EnableConfigurationProperties({MerchantProperties.class, MerchantGatewayProperties.class})
 public class MerchantConfiguration {
 }

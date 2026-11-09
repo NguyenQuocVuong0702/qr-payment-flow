@@ -27,3 +27,11 @@ server:
 app:
   merchant:
     id: MC001
+    gateway:
+      base-url: ${QR_GATEWAY_BASE_URL:http://localhost:${server.port}}
+      secret-key: ${QR_MERCHANT_SECRET:secret-mc001}
+logging:
+  level:
+    org.springframework.web: INFO
+    org.springframework.http: INFO
+    org.springframework.jdbc.datasource.init: INFO

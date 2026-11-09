@@ -1,0 +1,40 @@
+@baseUrl = http://localhost:8080
+# Thay bằng orderId trả về từ B1 trước khi gọi endpoint Merchant.
+@orderId = ORD20261109001
+
+### Merchant kích hoạt B2: chỉ nhận hạn thanh toán, lấy amount/description từ DB.
+POST {{baseUrl}}/api/merchant/orders/{{orderId}}/payments
+Content-Type: application/json
+
+{"expireMinutes":15}
+
+### Replay hoặc khôi phục sau timeout/lỗi lưu: cùng orderId, giữ txnRef/QR/hạn cũ.
+POST {{baseUrl}}/api/merchant/orders/{{orderId}}/payments
+Content-Type: application/json
+
+{"expireMinutes":15}
+
+### Gateway trực tiếp: fixture HMAC đúng với secret mẫu, tạo hoặc replay giao dịch.
+# orderId trong fixture độc lập với biến orderId phía trên.
+POST {{baseUrl}}/api/gateway/payments
+Content-Type: application/json
+
+{"merchantId":"MC001","orderId":"ORD20261102001","amount":55000,"description":"Thanh toan ao thun","expireMinutes":15,"signature":"bdda985548c27afd42ef3b29e6b868b767e1926e54ae52989e197321321e03ff"}
+
+### Sai chữ ký: 401 INVALID_SIGNATURE
+POST {{baseUrl}}/api/gateway/payments
+Content-Type: application/json
+
+{"merchantId":"MC001","orderId":"ORD20261102001","amount":55000,"description":"Thanh toan ao thun","expireMinutes":15,"signature":"invalid"}
+
+### Merchant không tồn tại: 404 MERCHANT_NOT_FOUND
+POST {{baseUrl}}/api/gateway/payments
+Content-Type: application/json
+
+{"merchantId":"MC404","orderId":"ORD1","amount":55000,"description":"Ao thun","expireMinutes":15,"signature":"invalid"}
+
+### Hạn không hợp lệ: 400 INVALID_EXPIRE_MINUTES
+POST {{baseUrl}}/api/merchant/orders/{{orderId}}/payments
+Content-Type: application/json
+
+{"expireMinutes":61}

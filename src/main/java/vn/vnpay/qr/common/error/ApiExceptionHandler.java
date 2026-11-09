@@ -32,7 +32,8 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     protected ResponseEntity<Object> handleMethodArgumentNotValid(MethodArgumentNotValidException ex,
             HttpHeaders headers, HttpStatusCode status, WebRequest request) {
         // Stable precedence if both fields are invalid; never echo rejected values.
-        String field = ex.getBindingResult().hasFieldErrors("amount") ? "amount" : "description";
+        String field = java.util.List.of("amount", "description", "expireMinutes", "merchantId", "orderId")
+                .stream().filter(name -> ex.getBindingResult().hasFieldErrors(name)).findFirst().orElse("request");
         return invalidField(field, headers, status);
     }
 
@@ -42,7 +43,7 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         Throwable cause = ex.getCause();
         if (cause instanceof JsonMappingException mapping && !mapping.getPath().isEmpty()) {
             String field = mapping.getPath().getFirst().getFieldName();
-            if ("amount".equals(field) || "description".equals(field)) {
+            if (field != null && java.util.Set.of("amount", "description", "expireMinutes").contains(field)) {
                 return invalidField(field, headers, status);
             }
         }
@@ -65,10 +66,18 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 .body(error("INTERNAL_ERROR", "An unexpected server error occurred"));
     }
 
+    @ExceptionHandler(ApiException.class)
+    ResponseEntity<ApiError> handleApiException(ApiException ex) {
+        return ResponseEntity.status(ex.status()).body(error(ex.errorCode(), ex.getMessage()));
+    }
+
     private ResponseEntity<Object> invalidField(String field, HttpHeaders headers, HttpStatusCode status) {
-        ApiError body = "amount".equals(field)
-                ? error("INVALID_AMOUNT", "amount must be an integer between 1000 and 500000000 VND")
-                : error("INVALID_DESCRIPTION", "description must contain 1-19 ASCII letters, digits or spaces and not be blank");
+        ApiError body = switch (field) {
+            case "amount" -> error("INVALID_AMOUNT", "amount must be an integer between 1000 and 500000000 VND");
+            case "description" -> error("INVALID_DESCRIPTION", "description must contain 1-19 ASCII letters, digits or spaces and not be blank");
+            case "expireMinutes" -> error("INVALID_EXPIRE_MINUTES", "expireMinutes must be an integer between 1 and 60");
+            default -> error("INVALID_REQUEST", "Request fields are missing or invalid");
+        };
         return new ResponseEntity<>(body, headers, status);
     }
 

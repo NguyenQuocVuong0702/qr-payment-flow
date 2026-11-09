@@ -1,8 +1,10 @@
-# Phân tích và thiết kế — Giai đoạn 1
+# Phân tích và thiết kế — B1, B2
 
 Tài liệu gốc: [bai-tap-luong-thanh-toan-qr.md](../bai-tap-luong-thanh-toan-qr.md).
 Khi có khác biệt, quy tắc nghiệp vụ, API, mã lỗi và kiểm thử trong đề được ưu tiên.
-Tài liệu này phân tích B1–B8; code hiện tại chỉ thực hiện B1.
+Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1 và B2. Phần B3–B8 bên dưới
+vẫn là thiết kế cho các giai đoạn sau, chưa có API hay nghiệp vụ tương ứng.
+Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md).
 
 ## 1. Quan hệ B1–B8
 
@@ -38,21 +40,22 @@ có checksum SHA-256 cho archive tải về.
 
 Các package sở hữu controller, DTO, domain, repository và HTTP client của mình.
 Không import service, repository, entity hay DTO nội bộ từ hai package còn lại.
-`common` chỉ chứa hạ tầng: Clock, HTTP builder, JSON, error envelope; không chứa
+`common` chỉ chứa hạ tầng: Clock, HTTP builder, JSON, HMAC, error envelope; không chứa
 service nghiệp vụ hoặc repository dùng chung. Bank thuộc Gateway nên được phép gọi
 nội bộ; không dựng HTTP Bank vì sẽ phá vỡ tính nguyên tử B5.
 Chưa thêm broker, cache, service discovery, OAuth, frontend hoặc thư viện kiến trúc.
 
 ## 2. Mô hình dữ liệu
 
-Chỉ `orders` và sequence `merchant_order_seq` được tạo trong giai đoạn 1.
-Những bảng bên dưới là thiết kế cho các giai đoạn sau, chưa có DDL/entity/seed.
+Đã tạo `orders`, `merchant`, `payment_txn`, sequence `merchant_order_seq` và
+`gateway_txn_seq`. `data.sql` nạp MC001 nếu thiếu, không ghi đè registry đã có.
+Account, ledger, Wallet và IPN chưa có DDL/entity/seed.
 
 | Bảng / chủ sở hữu | Khóa, cột chính và quan hệ dự kiến |
 |---|---|
 | `orders` / Merchant — đã tạo | PK `order_id`; merchant_id; BIGINT amount; VARCHAR(19) description; status; nullable UNIQUE txn_ref; created_at; nullable paid_at; version cho optimistic locking |
-| `merchant` / Gateway | PK merchant_id; name, city, mcc, secret_key, ipn_url; account_no FK → account |
-| `payment_txn` / Gateway | PK txn_ref; merchant_id FK → merchant; UNIQUE(merchant_id, order_id); amount, description, status, qr_string, expire_at; payer_account FK → account; nullable UNIQUE bank_ref; fail_reason, created_at, paid_at; index(status, expire_at) và (merchant_id, status, paid_at) |
+| `merchant` / Gateway — đã tạo | PK merchant_id; name, city, mcc, secret_key, ipn_url; account_no hiện là giá trị, chưa FK vì Bank chưa triển khai |
+| `payment_txn` / Gateway — đã tạo | PK txn_ref; merchant_id FK → merchant; UNIQUE(merchant_id, order_id); amount, description, status, qr_string, expire_at; nullable payer_account, UNIQUE bank_ref, fail_reason, paid_at; created_at và version. FK account và index tra cứu/hết hạn sẽ thêm khi có B5/B7/B8 |
 | `account` / Bank trong Gateway | PK account_no; owner_name; balance BIGINT CHECK balance >= 0; version |
 | `ledger_entry` / Bank | PK id; bank_ref; account_no FK → account; direction DEBIT/CREDIT; amount > 0; created_at; UNIQUE(bank_ref, direction) để không lặp bút toán |
 | `wallet_user` / Wallet | PK user_id; full_name; account_no tham chiếu logic; pin_hash BCrypt; bổ sung failed_pin_attempts, pin_locked_until để khóa 15 phút bền vững |
@@ -84,8 +87,8 @@ nâng cấp một bảng cũ. Chưa cần thêm Flyway cho một phiên bản sc
   `ORD` + ngày yyyyMMdd + sequence toàn cục đệm tối thiểu ba chữ số; không reset mỗi
   ngày, không yêu cầu liên tục, chấp nhận khoảng trống khi rollback/khởi động lại do
   sequence cache. `@Version` chuẩn
-  bị cho cập nhật đồng thời ở các bước sau, chưa có API thay đổi trạng thái.
-- **B2 dự kiến:** kiểm merchant, chữ ký và validation; UNIQUE(merchant_id, order_id)
+  bị cho cập nhật đồng thời. B2 cập nhật đơn qua khóa bi quan trong transaction ngắn.
+- **B2 đã triển khai:** kiểm merchant, chữ ký và validation; UNIQUE(merchant_id, order_id)
   là tuyến bảo vệ cuối khi tạo đồng thời. Nếu insert tranh chấp, rollback transaction
   đó rồi đọc giao dịch thắng trong transaction mới, tránh dùng transaction đã lỗi.
   Cùng orderId/PENDING cùng amount trả giao dịch cũ, giữ nguyên QR và hạn; khác amount
@@ -108,13 +111,14 @@ nâng cấp một bảng cũ. Chưa cần thêm Flyway cho một phiên bản sc
 - B5 phải test tổng số dư không đổi, đúng cặp ledger DEBIT/CREDIT, tối đa một bank_ref
   cho mỗi txnRef, replay giống kết quả gốc và tranh chấp hai requestId khác nhau.
 - HTTP qua `RestClient`: connect timeout 3s, read timeout 5s, không tự follow redirect.
-  B1 chưa phát sinh HTTP liên thành phần. B2/B4 chỉ retry với khóa nghiệp vụ giữ nguyên;
+  B1 chưa phát sinh HTTP liên thành phần. B2 đã dùng RestClient, B4 là dự kiến.
+  Chỉ retry với khóa nghiệp vụ giữ nguyên;
   timeout không đồng nghĩa thất bại thanh toán. Không giữ transaction/khóa DB khi gọi
   HTTP. Merchant gọi Gateway xong mới cập nhật local, có thể khôi phục qua replay/B7.
 
-## 4. HMAC, QR, PIN, IPN và đối soát (chưa triển khai)
+## 4. HMAC, QR đã triển khai; PIN, IPN và đối soát là dự kiến
 
-**HMAC:** dùng UTF-8; bỏ signature; sort tên trường tăng dần; nối key=value bằng &,
+**HMAC B2 đã triển khai:** dùng UTF-8; bỏ signature; sort tên trường tăng dần; nối key=value bằng &,
 không URL-encode, không đổi khoảng trắng hay format timestamp trong lúc verify;
 HMAC-SHA256 qua `javax.crypto.Mac`, lowercase hex. Verify hex hợp lệ rồi so byte bằng
 `MessageDigest.isEqual`. Các trường null tùy chọn được bỏ khỏi cả JSON gửi đi và
@@ -122,14 +126,16 @@ canonical string. Không log PIN, secret hoặc signature. Không serialize enti
 Merchant chỉ xác minh với secret cục bộ; Gateway dùng secret của merchant đăng ký.
 Dev seed secret là dữ liệu giả lập của đề, không dùng làm secret triển khai thật.
 
-**QR:** buildTlv length tính theo ký tự, hai chữ số, reject value >99; giữ nguyên
+**QR B2 đã triển khai:** buildTlv length tính theo ký tự, hai chữ số, reject value >99; giữ nguyên
 tất cả tag, template và giá trị của đề. Tag62/05 = 01 + yyMMddHHmm của expireAt +
 txnRef; tag62/08 tối đa 19 ASCII; tag62/09=M. CRC-16/CCITT-FALSE với poly 0x1021,
 init 0xFFFF, refin/refout=false, xorout=0; vector 123456789 → 29B1; tính UTF-8 trên
 toàn payload bao gồm 6304 rồi append bốn ký tự hex. CRC chỉ phát hiện lỗi, không
 xác thực người tạo. B3 parse xong phải hỏi Gateway và so amount thật trước khi trả
-thông tin cho khách. Project qr-parser chưa nằm trong workspace; B2 sẽ kiểm tra khả
-năng tích hợp và chạy kiểm thử Type04, không tự nhận tương thích khi chưa kiểm chứng.
+thông tin cho khách. Đã tìm thấy project gốc ở `../qr-parser/qr-parser`, sao chép
+pom và main source không chỉnh sửa vào `.build/` để build trong vùng được ghi.
+`QrParserCompatibilityIT` đã gọi API project gốc với QR sinh từ Gateway, type 04:
+HTTP 200, status VALID, CRC VALID. Không dùng parser tự viết để xác nhận tương thích.
 
 **PIN:** Wallet dùng BCrypt, không đưa PIN sang Gateway; khóa user khi cập nhật số lần
 sai để hai request không vượt bộ đếm. Lần sai thứ ba trả 423 PIN_LOCKED, khóa 15 phút;
@@ -163,7 +169,7 @@ API báo cáo; nếu bật sửa missingInMerchant, phải verify B7 có HMAC v�
 | JSON hỏng/không body/lỗi máy chủ chưa có mã | Bổ sung mã kỹ thuật INVALID_REQUEST (HTTP 400 hoặc status HTTP tương ứng) và INTERNAL_ERROR (500), cùng envelope; không đổi hai mã nghiệp vụ B1, không lộ dữ liệu/stacktrace |
 | Định dạng orderId là ví dụ, không có thuật toán bắt buộc | ORD + ngày nghiệp vụ + sequence DB tối thiểu 3 số, PK bảo vệ; không đặt giới hạn 999 đơn/ngày |
 | “Mọi thao tác ghi idempotent” nhưng B1 không có khóa client | Giữ đúng API B1, không thêm body/header. Hai POST có amount/description giống nhau là hai đơn. Không thể phân biệt retry với mua hàng mới; không dùng hash body để gộp đơn. Đây là giới hạn hợp đồng gốc; muốn retry B1 an toàn phải thống nhất thêm client request key ở một thay đổi yêu cầu riêng. B2/B5 áp dụng đầy đủ khóa orderId/requestId của đề |
-| Cách Merchant kích hoạt B2 chưa có endpoint | Chưa tạo endpoint mới ở giai đoạn 1. B2 cần chốt điểm kích hoạt riêng; tuyệt đối không tự gắn gọi Gateway vào B1 đang trả CREATED |
+| Cách Merchant kích hoạt B2 chưa có endpoint | Đã chọn POST /api/merchant/orders/{orderId}/payments, body chỉ expireMinutes. B1 giữ nguyên CREATED; amount/description/merchantId lấy từ DB, trường lạ bị từ chối |
 | B2 cùng orderId/PENDING nhưng đổi description/hạn | Nếu amount không đổi, ưu tiên quy tắc trả đúng txn cũ; không sửa payload/QR/hạn. Với trạng thái terminal không tạo txn mới, dự kiến trả trạng thái txn hiện có |
 | B3 nói quá hạn → TXN_NOT_PAYABLE, bảng lỗi và test #8 dùng TXN_EXPIRED | B5/test #8 chắc chắn TXN_EXPIRED. B3: hết hạn (kể cả job đã EXPIRED) ưu tiên TXN_EXPIRED theo bảng mã; terminal khác dùng TXN_NOT_PAYABLE. Chưa triển khai |
 | Cùng requestId nhưng khác txn/account/amount | Không thực hiện lại, kiểm fingerprint; cần chốt mã lỗi cho việc sử dụng sai khóa khi triển khai B5 vì đề chưa có mã dành cho trường hợp này |
@@ -173,17 +179,84 @@ API báo cáo; nếu bật sửa missingInMerchant, phải verify B7 có HMAC v�
 | Dữ liệu mẫu U002 thiếu PIN và full_name | Seed ở B4/B5; chọn tên mô tả và PIN giả lập 123456 cho U002, BCrypt khi lưu, ghi rõ seed. Chưa seed các thành phần ngoài B1 |
 | Chưa chỉ rõ ngày đối soát theo createdAt hay paidAt | Dùng ngày paidAt vì đối soát giao dịch thành công; múi giờ +07:00, interval nửa mở |
 
-## 6. Kế hoạch B2 và kiểm thử tiếp theo
+## 6. B2 đã triển khai: các ranh giới transaction
 
-1. Chốt điểm kích hoạt B2 từ Merchant; thêm merchant registry và seed MC001/account
-   thuộc Gateway ở đúng giai đoạn, không để Merchant truy cập bảng Gateway.
-2. Thêm payment_txn, khóa duy nhất, trạng thái và lưu description, chuẩn bị HTTP client
-   Merchant → Gateway; tách transaction HTTP khỏi transaction lưu đơn.
-3. Viết HMAC canonicalizer, test vector và constant-time verification, giữ đúng API.
-4. Viết buildTlv và CRC, vector 29B1, tag62/05 và timezone; QR Type04 qua qr-parser.
-5. Test 201, 400/401/404/409, replay, tranh chấp tạo txn, cập nhật WAITING_PAYMENT và
-   phục hồi khi Gateway đã commit nhưng Merchant chưa nhận response.
-6. Chạy lại toàn bộ test B1 cùng test B2; chỉ sau đó báo cáo và dừng trước B3.
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant M as Merchant
+    participant G as Gateway
+    C->>M: POST /api/merchant/orders (B1)
+    M-->>C: 201 CREATED
+    C->>M: POST /api/merchant/orders/{orderId}/payments
+    M->>M: Transaction đọc OrderPaymentSnapshot, kết thúc
+    M->>G: RestClient HTTP POST payments + HMAC
+    G->>G: Transaction xác thực, tìm/tạo payment_txn
+    G-->>M: Sau commit: 201 + QR + X-Signature
+    M->>M: Verify HMAC và kiểm orderId/amount/status
+    M->>M: Transaction khóa đơn, attach txnRef, WAITING_PAYMENT, commit
+    M-->>C: 201 với nguyên sáu trường Gateway
+```
 
-12 kịch bản tích hợp của đề đều đi qua bước sau B1. Chúng chưa được triển khai,
-không tạo test placeholder/disabled rồi coi là hoàn thành.
+- `MerchantPaymentService` và `GatewayPaymentService` dùng propagation NEVER, tránh
+  caller vô tình bao toàn bộ điều phối/HTTP trong transaction. Transaction nằm trong
+  bean riêng: `MerchantPaymentStore` và `PaymentCreationTransaction`.
+- Merchant chỉ nhận expireMinutes từ client, từ chối trường lạ. Snapshot lấy
+  orderId/merchantId/amount/description từ DB; không đọc registry Gateway hoặc import
+  DTO/entity/repository của Gateway. DTO HTTP ở Merchant và Gateway là riêng biệt.
+- Unique `(merchant_id, order_id)` chặn cả hai request chưa thấy row lúc đọc. Insert
+  thua rollback; service ngoài transaction đọc winner qua transaction mới, so amount
+  để replay hoặc trả 409 ORDER_CONFLICT. Không dùng synchronized hoặc cache RAM.
+- Merchant attach dùng SELECT FOR UPDATE và chỉ CREATED → WAITING_PAYMENT;
+  WAITING_PAYMENT cùng txnRef là no-op; ref khác/trạng thái khác trả ORDER_CONFLICT.
+- Không ghi trạng thái trung gian kiểu “đang gọi HTTP” vào orders. Mất response, lỗi
+  verify hoặc attach rollback để đơn còn CREATED; retry cùng orderId lấy đúng txn cũ.
+  Không có tự động retry nền hoặc cơ chế tạo lại B1. Cơ chế này cũng xử lý crash giữa
+  hai commit, miễn client tiếp tục cùng orderId và giao dịch còn PENDING.
+- Gateway trả 201 cho cả tạo và replay; giữ nguyên QR/hạn/description cũ nếu amount
+  không đổi. Chưa thực hiện job hết hạn, chuyển trạng thái thanh toán hoặc tạo lại
+  giao dịch terminal. Các enum/cột cho giai đoạn sau chưa có nghiệp vụ thực thi.
+
+## 7. Chi tiết hợp đồng B2 và giả định bổ sung
+
+- `txnRef = TX` + sequence 8 chữ số. Sequence MAXVALUE 99999999, NO CYCLE, không reset
+  khi restart. Tag62/05 có 22 ký tự, nằm trong giới hạn 25 của Type04 gốc. Chấp nhận
+  sequence gap khi rollback/restart; hết miền sequence thì thất bại, không quay vòng.
+- expireAt lấy Clock + expireMinutes, độ chính xác giây; QR biểu diễn hạn đến phút
+  `yyMMddHHmm` đúng đề, không dùng mốc QR để cập nhật dữ liệu Gateway. Merchant giữ
+  nguyên offset +07 khi deserialize/serialize, không tự đổi expireAt thành UTC.
+- merchantId chỉ ASCII chữ/số tối đa 13 (giới hạn tag26/01); orderId ASCII chữ/số,
+  `_`/`-`, tối đa 32. Reject ký tự phân cách `&`/`=` trong identifier để tránh nhập
+  nhằng canonicalization. Body Gateway có trường lạ bị reject thay vì bỏ khỏi HMAC.
+- Request JSON đúng kiểu được validate trước merchant lookup/HMAC; amount ưu tiên
+  trước description rồi expireMinutes. Merchant lookup trước kiểm signature như
+  quy tắc 404 của đề. Signature thiếu/sai/không lowercase hex 64 ký tự → 401.
+- Bổ sung INVALID_EXPIRE_MINUTES (400) vì đề chưa đặt mã cho hạn không hợp lệ;
+  ORDER_NOT_FOUND (404) cho endpoint Merchant mới; GATEWAY_UNAVAILABLE và
+  INVALID_GATEWAY_RESPONSE (502) cho kết quả HTTP không xác định/không đáng tin.
+  Giữ nguyên mã nghiệp vụ B1/B2 đã quy định và envelope errorCode/message/timestamp.
+- Gateway ký response JSON bằng secret của merchant trong header X-Signature,
+  không thêm field vào sáu trường đề bài. Ký cả error envelope nếu đã parse được
+  merchantId đăng ký; unknown merchant hoặc JSON chưa parse được không có key để
+  chọn, nên response này không có chữ ký. Merchant không phản chiếu nội dung lỗi
+  chưa xác thực và không dùng chúng để thay đổi đơn. Error xác thực được chỉ chuyển
+  tiếp mã whitelist với HTTP tương ứng, không phản chiếu message Gateway tùy ý.
+- HMAC hiện hỗ trợ các giá trị scalar của B2, null optional bỏ qua. Array/object
+  canonical JSON của B8 vẫn là thiết kế tương lai. DTO request và config có secret
+  được redact toString; giảm log Spring web/HTTP/SQL-init để không log signature hay
+  literal secret trong seed. Không tạo endpoint hiển thị registry/secret.
+- Seed MC001 theo đề, account_no chỉ metadata, không tạo account hay chuyển tiền.
+  `schema.sql` B2 chỉ bổ sung bảng/sequence mới; không sửa orders. Smoke test JAR đã
+  nâng cấp bản sao file H2 B1 có 2 đơn, giữ dữ liệu cũ, tạo/replay một payment mới.
+
+## 8. Kiểm thử và phạm vi dừng
+
+Đã chạy 118 test: 66 B1 và 52 B2, 0 failure/error/skipped; có kiểm chứng API gốc
+qr-parser Type04 qua HTTP, không chỉ so TLV bằng code tự viết. Test bao phủ cả hai
+request đồng thời khác amount (một 201, một 409), hai request Merchant cùng đơn,
+response sai HMAC/JSON hỏng, mất response sau Gateway commit, attach rollback và retry.
+Xem lệnh và evidence trong [phase2-report.md](phase2-report.md).
+
+Dừng tại B2. Trong 12 kịch bản end-to-end của đề, mới kiểm được kịch bản #2;
+chưa có full happy path B1–B8 hoặc các kịch bản B3–B8. Không tạo test placeholder
+hay disabled để tính hoàn thành.
