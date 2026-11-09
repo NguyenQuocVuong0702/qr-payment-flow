@@ -1,0 +1,43 @@
+@baseUrl = http://localhost:8080
+
+### B1: tạo đơn, mong đợi 201 CREATED
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":55000,"description":"Thanh toan ao thun"}
+
+### Biên dưới và mô tả 1 ký tự: 201
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":1000,"description":"A"}
+
+### Biên trên và mô tả 19 ký tự: 201
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":500000000,"description":"AbCdE0123456789 Xyz"}
+
+### Sai số tiền: 400 INVALID_AMOUNT
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":999,"description":"Ao thun"}
+
+### Số thực không được ép sang long: 400 INVALID_AMOUNT
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":55000.5,"description":"Ao thun"}
+
+### Ví dụ dài quá giới hạn trong đề: 400 INVALID_DESCRIPTION
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":55000,"description":"Thanh toan don hang ao thun"}
+
+### Mô tả có dấu: 400 INVALID_DESCRIPTION
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":55000,"description":"Thanh toán"}
