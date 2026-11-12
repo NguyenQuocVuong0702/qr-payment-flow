@@ -1,10 +1,11 @@
-# Phân tích và thiết kế — B1, B2
+# Phân tích và thiết kế — B1, B2, B3
 
 Tài liệu gốc: [bai-tap-luong-thanh-toan-qr.md](../bai-tap-luong-thanh-toan-qr.md).
 Khi có khác biệt, quy tắc nghiệp vụ, API, mã lỗi và kiểm thử trong đề được ưu tiên.
-Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1 và B2. Phần B3–B8 bên dưới
+Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1, B2 và B3. Phần B4–B8 bên dưới
 vẫn là thiết kế cho các giai đoạn sau, chưa có API hay nghiệp vụ tương ứng.
-Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md).
+Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md) và
+[báo cáo B3](phase3-report.md).
 
 ## 1. Quan hệ B1–B8
 
@@ -171,10 +172,10 @@ API báo cáo; nếu bật sửa missingInMerchant, phải verify B7 có HMAC v�
 | “Mọi thao tác ghi idempotent” nhưng B1 không có khóa client | Giữ đúng API B1, không thêm body/header. Hai POST có amount/description giống nhau là hai đơn. Không thể phân biệt retry với mua hàng mới; không dùng hash body để gộp đơn. Đây là giới hạn hợp đồng gốc; muốn retry B1 an toàn phải thống nhất thêm client request key ở một thay đổi yêu cầu riêng. B2/B5 áp dụng đầy đủ khóa orderId/requestId của đề |
 | Cách Merchant kích hoạt B2 chưa có endpoint | Đã chọn POST /api/merchant/orders/{orderId}/payments, body chỉ expireMinutes. B1 giữ nguyên CREATED; amount/description/merchantId lấy từ DB, trường lạ bị từ chối |
 | B2 cùng orderId/PENDING nhưng đổi description/hạn | Nếu amount không đổi, ưu tiên quy tắc trả đúng txn cũ; không sửa payload/QR/hạn. Với trạng thái terminal không tạo txn mới, dự kiến trả trạng thái txn hiện có |
-| B3 nói quá hạn → TXN_NOT_PAYABLE, bảng lỗi và test #8 dùng TXN_EXPIRED | B5/test #8 chắc chắn TXN_EXPIRED. B3: hết hạn (kể cả job đã EXPIRED) ưu tiên TXN_EXPIRED theo bảng mã; terminal khác dùng TXN_NOT_PAYABLE. Chưa triển khai |
+| B3 nói quá hạn → TXN_NOT_PAYABLE, bảng lỗi và test #8 dùng TXN_EXPIRED | B3 hiện dùng TXN_EXPIRED khi trạng thái EXPIRED hoặc PENDING đến/quá expireAt; terminal khác dùng TXN_NOT_PAYABLE. B5/test #8 vẫn là thiết kế tương lai |
 | Cùng requestId nhưng khác txn/account/amount | Không thực hiện lại, kiểm fingerprint; cần chốt mã lỗi cho việc sử dụng sai khóa khi triển khai B5 vì đề chưa có mã dành cho trường hợp này |
 | Chữ ký response, query GET chưa minh họa | Quy tắc mọi tin Merchant–Gateway có HMAC: request GET ký merchantId + txnRef, reconciliation ký date + merchantId, đặt ở X-Signature; response ký toàn bộ JSON, đặt ở X-Signature để giữ nguyên JSON đề. Với giá trị array/object của B8, dùng JSON compact UTF-8, sort key đệ quy, giữ thứ tự array; Gateway sort transactions theo txnRef trước khi tạo response. Hai bên cần test vector chung ở B8; không tự bỏ ký response |
-| Wallet gọi GET Gateway trong B3 nhưng B7 nêu header Merchant | Header HMAC bắt buộc với caller Merchant; Wallet dùng nhánh truy vấn chỉ đọc theo txnRef theo B3, không giữ secret Merchant. Không tự thêm OAuth vào bài |
+| Wallet gọi GET Gateway trong B3 nhưng B7 nêu header Merchant | GET hiện phân biệt bằng credential đã xác thực: Wallet dùng Bearer token riêng, chỉ projection xác nhận; Merchant bắt buộc HMAC và quyền sở hữu. Header Merchant thiếu/sai/mixed không fallback Wallet. Không dùng query caller hoặc header vai trò tự khai để bỏ qua HMAC |
 | “3 lần” IPN nhưng liệt kê 3 khoảng chờ | Chọn tổng 3 lần gửi, chờ lần lượt 10s, 30s, 60s trước mỗi lần thử (mốc sớm nhất sau commit +10s, +40s, +100s, chưa kể thời gian HTTP); không gửi lần thứ tư. Có cấu hình rút ngắn trong test. Đáp ứng kịch bản #9 ba dòng log; ghi rõ trước B6 |
 | Dữ liệu mẫu U002 thiếu PIN và full_name | Seed ở B4/B5; chọn tên mô tả và PIN giả lập 123456 cho U002, BCrypt khi lưu, ghi rõ seed. Chưa seed các thành phần ngoài B1 |
 | Chưa chỉ rõ ngày đối soát theo createdAt hay paidAt | Dùng ngày paidAt vì đối soát giao dịch thành công; múi giờ +07:00, interval nửa mở |
@@ -257,6 +258,56 @@ request đồng thời khác amount (một 201, một 409), hai request Merchant
 response sai HMAC/JSON hỏng, mất response sau Gateway commit, attach rollback và retry.
 Xem lệnh và evidence trong [phase2-report.md](phase2-report.md).
 
-Dừng tại B2. Trong 12 kịch bản end-to-end của đề, mới kiểm được kịch bản #2;
-chưa có full happy path B1–B8 hoặc các kịch bản B3–B8. Không tạo test placeholder
-hay disabled để tính hoàn thành.
+Mốc B2 ở trên giữ nguyên kết quả 118 test. Kết quả mở rộng B3 ở báo cáo B3.
+
+## 9. B3: quét QR và GET có phân quyền
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Wallet
+    participant G as Gateway
+    C->>W: POST /api/wallet/scan (userId, qrString)
+    W->>W: Parse TLV, required tags, 62/05 và CRC
+    W->>G: RestClient GET /payments/{txnRef}, credential Wallet
+    G->>G: Xác thực quyền đọc, transaction chỉ đọc payment + merchant
+    G-->>W: Projection xác nhận + X-Signature, no-store
+    W->>W: Verify HMAC/txnRef; so amount; kiểm status và Clock
+    W-->>C: 200: thông tin thật từ Gateway hoặc error envelope
+```
+
+- Wallet sở hữu parser và HTTP DTO riêng, không import Gateway. B3 không mở transaction
+  khi HTTP, không có bảng mới, không ghi DB và không chuyển PENDING sang EXPIRED.
+  CRC chuyển thành thuật toán chung trong common/qr; facade Gateway giữ nguyên API
+  B2 để tái sử dụng đúng thuật toán mà không import nghiệp vụ qua ranh giới.
+- Parser nhỏ chỉ phục vụ cấu trúc B2: giới hạn 512 ký tự UTF-16, header tag/length là
+  hai số ASCII, length tính code point, đọc hết payload/template 26/62, reject tag lặp,
+  thiếu tag, value cắt ngắn, control character/unpaired surrogate; 00 đầu, 63 cuối,
+  6304 + bốn hex. Không trim dữ liệu. Tag lạ hợp lệ về TLV có thể tồn tại.
+- Bắt buộc các tag của B2 và 26/00,26/01,62/05,62/08,62/09; kiểm các giá trị cố định
+  của QR động VND/VN/GUID. 62/05 đúng prefix 01 + yyMMddHHmm hợp lệ + TX và 8 số như
+  B2 hiện sinh. Thế kỷ 20yy chỉ dùng kiểm ngày hợp lệ, không dùng làm hạn thanh toán.
+  Hạn quyết định là expireAt trả về từ Gateway.
+- CRC sai sau khi cấu trúc đã hợp lệ → CRC_MISMATCH; cấu trúc/trường sai → INVALID_QR.
+  Sau lookup, ưu tiên AMOUNT_MISMATCH trước trạng thái/hạn, đúng thứ tự đề. Trạng thái
+  terminal khác EXPIRED → TXN_NOT_PAYABLE; PENDING tại expireAt đã không còn payable.
+- GET cùng đường dẫn nhưng hai hợp đồng theo credential: Wallet Bearer credential chỉ
+  nhận projection 8 trường, không orderId/bankRef/tài khoản; Merchant cặp header HMAC
+  nhận các trường B7, chỉ khi merchantId sở hữu giao dịch. Không có nhánh anonymous.
+  Chữ ký GET Merchant là canonical merchantId + txnRef; không phụ thuộc caller tự khai.
+- Nếu có bất kỳ header Merchant: bắt buộc đúng một header mỗi loại và không trộn
+  Authorization. Sai/missing/duplicate/mixed → 401 INVALID_SIGNATURE, không thử lại
+  nhánh Wallet. Merchant hợp lệ nhưng khác chủ sở hữu → 404 TXN_NOT_FOUND.
+- Sau xác thực, ký cả thành công và lỗi lookup bằng secret tương ứng, no-store.
+  Wallet verify bằng credential riêng của mình, không giữ secret Merchant. Kết nối
+  mất/5xx → 502 GATEWAY_UNAVAILABLE; response hỏng/sai HMAC/txnRef → 502
+  INVALID_GATEWAY_RESPONSE; chỉ 404 TXN_NOT_FOUND có xác thực được chuyển nguyên mã.
+- Credential mẫu dev được cấu hình qua QR_WALLET_READ_TOKEN hai phía; không đưa vào
+  QR/body scan, không log. Đây là credential service nội bộ, không phải xác thực U001.
+  userId được validate hình thức, chưa có user registry/PIN hay wallet_user ở B3.
+
+Kết quả B3: 185 test PASS (118 cũ + 67 mới), không failure/error/skipped. Chưa có
+full flow B1–B8; các ca CRC sửa tên và sửa amount rồi tính lại CRC ở B3 đã được test.
+
+Dừng B3: GET chỉ là nền tảng cần cho B3 và bảo vệ sẵn cho B7; chưa có workflow B7,
+job hết hạn, B4 xác nhận/PIN, Bank, IPN, đối soát hoặc hoàn tiền.

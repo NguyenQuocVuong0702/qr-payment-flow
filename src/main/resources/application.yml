@@ -25,6 +25,13 @@ server:
     include-stacktrace: never
     include-binding-errors: never
 app:
+  gateway:
+    wallet:
+      read-token: ${QR_WALLET_READ_TOKEN:wallet-read-token-dev-only}
+  wallet:
+    gateway:
+      base-url: ${QR_GATEWAY_BASE_URL:http://localhost:${server.port}}
+      read-token: ${QR_WALLET_READ_TOKEN:wallet-read-token-dev-only}
   merchant:
     id: MC001
     gateway:

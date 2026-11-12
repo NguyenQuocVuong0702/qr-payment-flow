@@ -1,0 +1,35 @@
+@baseUrl = http://localhost:8080
+# Thay bằng QR trả về từ B2. Mẫu cố định dưới dùng cho test cấu trúc;
+# để scan thành công cần txnRef tồn tại, còn PENDING và chưa hết hạn ở Gateway.
+@qrString = 00020101021226230010A0000007750105MC0015204549953037045405550005802VN5908SHOP ABC6005HANOI62530522012611020915TX000000010818Thanh toan ao thun0901M6304C9E9
+@txnRef = TX00000001
+
+### B3 scan — 200 hoặc mã nghiệp vụ theo trạng thái Gateway
+POST {{baseUrl}}/api/wallet/scan
+Content-Type: application/json
+
+{"userId":"U001","qrString":"{{qrString}}"}
+
+### TLV thiếu tag — 422 INVALID_QR
+POST {{baseUrl}}/api/wallet/scan
+Content-Type: application/json
+
+{"userId":"U001","qrString":"000201"}
+
+### Đổi tên giữ CRC — 422 CRC_MISMATCH, không gọi Gateway
+POST {{baseUrl}}/api/wallet/scan
+Content-Type: application/json
+
+{"userId":"U001","qrString":"00020101021226230010A0000007750105MC0015204549953037045405550005802VN5908SHOP ABD6005HANOI62530522012611020915TX000000010818Thanh toan ao thun0901M6304C9E9"}
+
+### GET projection Wallet, credential mẫu dev
+GET {{baseUrl}}/api/gateway/payments/{{txnRef}}
+Authorization: Bearer wallet-read-token-dev-only
+
+### GET không credential bị từ chối — 401
+GET {{baseUrl}}/api/gateway/payments/{{txnRef}}
+
+### Merchant thiếu chữ ký không được dùng nhánh Wallet — 401 INVALID_SIGNATURE
+GET {{baseUrl}}/api/gateway/payments/{{txnRef}}
+X-Merchant-Id: MC001
+Authorization: Bearer wallet-read-token-dev-only

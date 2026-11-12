@@ -1,8 +1,8 @@
-# QR Payment Flow — B1 và B2
+# QR Payment Flow — B1, B2 và B3
 
 Ứng dụng bài tập Java 21, Spring Boot 3.5.16, Maven 3.9.16, H2.
-Đã triển khai **B1: tạo đơn hàng** và **B2: Gateway tạo giao dịch, sinh QR động**.
-B3–B8 chưa triển khai.
+Đã triển khai **B1: tạo đơn hàng**, **B2: tạo giao dịch/QR động** và
+**B3: Wallet quét, xác minh QR bằng dữ liệu Gateway**. B4–B8 chưa triển khai đầy đủ.
 
 - [Đề bài chính thức](bai-tap-luong-thanh-toan-qr.md)
 - [Phân tích B1–B8, mô hình dữ liệu, transaction và các quyết định](docs/architecture.md)
@@ -10,6 +10,8 @@ B3–B8 chưa triển khai.
 - [Báo cáo giai đoạn 1 và kết quả kiểm chứng thực tế](docs/phase1-report.md)
 - [Báo cáo B2, quyết định kỹ thuật và kết quả kiểm chứng](docs/phase2-report.md)
 - [Request B2](requests/b2.http)
+- [Báo cáo B3 và thiết kế quyền GET dùng chung](docs/phase3-report.md)
+- [Request B3](requests/b3.http)
 
 ## Cấu trúc
 
@@ -21,6 +23,7 @@ src/main/java/vn/vnpay/qr/
   QrPaymentApplication.java
   common/config/                      Clock, RestClient builder, JSON strict
   common/crypto/                      Canonicalization và HMAC-SHA256
+  common/qr/                          CRC dùng chung
   common/error/                       Error envelope và advice
   merchant/
     api/                              Controller và request/response DTO
@@ -30,12 +33,17 @@ src/main/java/vn/vnpay/qr/
     repository/                       JPA repository, sequence cấp orderId
     service/                          B1; điều phối B2 và transaction đọc/lưu riêng
   gateway/
-    api/                              POST payments, ký response
+    api/                              POST payments; GET có phân quyền và ký response
     domain/                           Merchant registry, PaymentTxn, PaymentStatus
     repository/                       Các repository chỉ Gateway sử dụng
     service/                          Tạo/replay và phục hồi unique-key race
     qr/                               TLV động, CRC-16/CCITT-FALSE
-  wallet/package-info.java            Ranh giới cho giai đoạn sau
+  wallet/
+    api/                              POST scan và DTO
+    qr/                               Parser TLV, CRC, tách 62/05
+    client/                           RestClient và DTO riêng của Wallet
+    config/                           URL và credential đọc Gateway
+    service/                          So amount, status và expireAt qua Clock
 src/main/resources/
   application.yml
   application-dev.yml                 H2 file, H2 console local
@@ -48,10 +56,13 @@ src/test/java/vn/vnpay/qr/
   gateway/CryptoAndQrTest.java
   gateway/GatewayPaymentApiIntegrationTest.java
   gateway/QrParserCompatibilityIT.java Kiểm tra ngoài qua API qr-parser gốc
+  wallet/PaymentQrParserTest.java
+  wallet/WalletScanHttpIntegrationTest.java
 src/test/resources/application-test.yml
 docs/architecture.md
 requests/b1.http
 requests/b2.http
+requests/b3.http
 ```
 
 Merchant → Gateway hiện gọi qua HTTP thật, không import service/repository/entity
@@ -243,6 +254,77 @@ trong transaction ngắn. Không tạo lại B1 để retry B2. Thay description
 của request replay không cập nhật giao dịch cũ. B2 chưa chạy job hết hạn; replay cũng
 không gia hạn hoặc tự tạo giao dịch mới.
 
+## API B3 — Wallet quét QR
+
+`POST /api/wallet/scan`
+
+```json
+{"userId":"U001","qrString":"<chuỗi qrString trả về từ B2>"}
+```
+
+PowerShell, tiếp theo biến `$payment` ở ví dụ B2:
+
+```powershell
+$scan = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/wallet/scan `
+  -ContentType application/json `
+  -Body (@{userId='U001'; qrString=$payment.qrString} | ConvertTo-Json)
+$scan
+```
+
+200 OK, ví dụ (hạn thanh toán thực tế lấy từ Gateway):
+
+```json
+{
+  "txnRef":"TX00000001",
+  "merchantName":"SHOP ABC",
+  "merchantCity":"HANOI",
+  "amount":55000,
+  "currency":"VND",
+  "description":"Thanh toan ao thun",
+  "expireAt":"2026-11-12T09:15:00+07:00"
+}
+```
+
+Wallet parse TLV/required tags và CRC trước khi gọi HTTP; lấy txnRef sau prefix 01
+và 10 ký tự thời hạn của 62/05. Mọi trường hiển thị lấy từ Gateway, chỉ amount QR
+được dùng để đối chiếu. Hạn trong QR không quyết định hết hạn. B3 không ghi DB.
+
+| Trường hợp | HTTP / mã |
+|---|---|
+| TLV hỏng, thiếu/duplicate tag, sai 62/05, QR trống | 422 INVALID_QR |
+| CRC khác CRC tính lại | 422 CRC_MISMATCH |
+| Amount QR khác amount Gateway | 422 AMOUNT_MISMATCH |
+| Giao dịch không có | 404 TXN_NOT_FOUND |
+| Trạng thái terminal hoặc PROCESSING | 422 TXN_NOT_PAYABLE |
+| EXPIRED hoặc PENDING đến/quá expireAt của Gateway | 422 TXN_EXPIRED |
+| HTTP Gateway mất kết nối/5xx | 502 GATEWAY_UNAVAILABLE |
+| Response Gateway hỏng/sai chữ ký/không khớp txnRef | 502 INVALID_GATEWAY_RESPONSE |
+
+Lỗi đều có errorCode/message/timestamp. Chọn TXN_EXPIRED theo bảng mã và thiết kế
+đã duyệt vì mô tả B3 có chỗ dùng TXN_NOT_PAYABLE cho cả hết hạn. userId chỉ là ngữ
+cảnh bắt buộc; chưa xác thực người dùng, PIN hay nạp wallet_user ở B3.
+
+### GET Gateway dùng chung cho Wallet và Merchant
+
+`GET /api/gateway/payments/{txnRef}` không cho truy cập ẩn danh:
+
+- **Wallet:** `Authorization: Bearer <read-token>`. Chỉ trả txnRef, merchantName,
+  merchantCity, amount, currency, description, status, expireAt; không orderId,
+  bankRef hoặc tài khoản. Token riêng của Wallet, không phải secret Merchant.
+- **Merchant:** cặp `X-Merchant-Id` / `X-Signature` bắt buộc. Chuỗi ký GET:
+  `merchantId=MC001&txnRef=TX00000001`. Chỉ đọc giao dịch thuộc merchant đã xác
+  thực; response gồm các trường B7 theo đề, bỏ bankRef/paidAt nếu chưa có.
+- Có bất kỳ header Merchant nào là bắt buộc đi nhánh HMAC. Thiếu/sai/duplicate
+  header hoặc trộn với Authorization đều bị từ chối, không fallback sang Wallet.
+- Response sau xác thực (kể cả 404) có `X-Signature` HMAC trên JSON và
+  `Cache-Control: no-store`: dùng secret Merchant hoặc read-token Wallet tương ứng.
+  Wallet verify signature và txnRef trước khi dùng response.
+
+Cấu hình `QR_WALLET_READ_TOKEN` ở hai phía (mẫu dev local mặc định
+`wallet-read-token-dev-only`); `QR_GATEWAY_BASE_URL` dùng như B2. Token không nhận từ
+body scan và không nằm trong QR. B7 mới có nền tảng GET có phân quyền; chưa triển
+khai workflow Merchant tra cứu đơn hay job hết hạn.
+
 ## Kiểm thử
 
 ```powershell
@@ -256,7 +338,7 @@ sh mvnw test
 Test tự chọn profile `test`, dùng H2 memory riêng và fixed Clock khi kiểm thời gian.
 Không bọc test HTTP trong transaction. Test B2 có Gateway HTTP thật và proxy thử lỗi
 để kiểm mất response sau commit, lỗi lưu Merchant, response hỏng và concurrency.
-`mvnw test` chạy 117 test trong ứng dụng; kiểm tra qr-parser ngoài được tách thành
+Kiểm tra qr-parser ngoài được tách thành
 `QrParserCompatibilityIT`, phải khởi động project gốc để chạy, không âm thầm skip.
 
 Kiểm tra Type04 bằng project gốc trong terminal khác, từ thư mục qr-parser chứa pom.xml:
@@ -266,16 +348,17 @@ Kiểm tra Type04 bằng project gốc trong terminal khác, từ thư mục qr-
 java -jar target/qr-parser-0.0.1-SNAPSHOT.jar --server.port=8081
 ```
 
-Tại qr-payment-flow, chạy **toàn bộ B1+B2 kèm kiểm chứng Type04**:
+Tại qr-payment-flow, chạy **toàn bộ B1+B2+B3 kèm kiểm chứng Type04**:
 
 ```powershell
 .\mvnw.cmd "-Dtest=*Test,*IT" "-Dqr.parser.url=http://localhost:8081" test package
 ```
 
-Kết quả thực tế ngày 2026-11-09: **118 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
-66 test B1 và 52 test B2. `qr-parser` gốc trả HTTP 200, `status=VALID`, CRC VALID cho
+Kết quả thực tế ngày 2026-11-12: **185 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
+118 test cũ và 67 test B3. `mvnw test` mặc định chạy 184 test nội bộ. `qr-parser`
+gốc trả HTTP 200, `status=VALID`, CRC VALID cho
 QR thực sự sinh bởi Gateway với `type="04"`. JAR đóng gói thành công. Đây chưa phải
-toàn bộ 12 kịch bản end-to-end B1–B8. Xem [báo cáo B2](docs/phase2-report.md).
+toàn bộ 12 kịch bản end-to-end B1–B8. Xem [báo cáo B3](docs/phase3-report.md).
 
 Môi trường triển khai hiện tại giới hạn ghi ngoài workspace, nên lệnh kiểm chứng dùng
 cache cục bộ (không thay đổi cấu hình Maven của người dùng):
@@ -292,6 +375,6 @@ trong wrapper properties, rồi nạp vào cache cục bộ. Các lần test sau
 
 ## Phạm vi còn lại
 
-Dừng tại B2. Chưa triển khai B3–B8: scan, PIN, khóa PIN, chuyển tiền, IPN, tra cứu,
-job hết hạn, đối soát hoặc hoàn tiền. Không có tự động retry nền phía Merchant;
-client gọi lại payments với cùng orderId để khôi phục. Git đã lưu riêng mốc B1 và B2.
+Dừng tại B3. Chưa triển khai B4–B8: PIN, xác nhận thanh toán, chuyển tiền, IPN,
+workflow Merchant tra cứu, job hết hạn, đối soát hoặc hoàn tiền. Không có tự động
+retry nền phía Merchant; client gọi lại payments với cùng orderId để khôi phục.
