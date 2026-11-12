@@ -12,6 +12,7 @@
 - [Request B2](requests/b2.http)
 - [Báo cáo B3 và thiết kế quyền GET dùng chung](docs/phase3-report.md)
 - [Request B3](requests/b3.http)
+- [Thiết kế B4–B5](docs/b4-b5-design.md), [báo cáo mốc B4](docs/phase4-report.md)
 
 ## Cấu trúc
 

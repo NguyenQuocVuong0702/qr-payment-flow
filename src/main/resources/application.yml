@@ -29,6 +29,8 @@ app:
     wallet:
       read-token: ${QR_WALLET_READ_TOKEN:wallet-read-token-dev-only}
   wallet:
+    payment:
+      secret: ${QR_WALLET_PAYMENT_SECRET:wallet-payment-secret-dev-only}
     gateway:
       base-url: ${QR_GATEWAY_BASE_URL:http://localhost:${server.port}}
       read-token: ${QR_WALLET_READ_TOKEN:wallet-read-token-dev-only}
