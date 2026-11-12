@@ -26,6 +26,8 @@ server:
     include-binding-errors: never
 app:
   gateway:
+    confirm:
+      secret: ${QR_WALLET_PAYMENT_SECRET:wallet-payment-secret-dev-only}
     wallet:
       read-token: ${QR_WALLET_READ_TOKEN:wallet-read-token-dev-only}
   wallet:

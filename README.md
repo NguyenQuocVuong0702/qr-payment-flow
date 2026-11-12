@@ -1,8 +1,8 @@
-# QR Payment Flow — B1, B2 và B3
+# QR Payment Flow — B1–B5
 
 Ứng dụng bài tập Java 21, Spring Boot 3.5.16, Maven 3.9.16, H2.
-Đã triển khai **B1: tạo đơn hàng**, **B2: tạo giao dịch/QR động** và
-**B3: Wallet quét, xác minh QR bằng dữ liệu Gateway**. B4–B8 chưa triển khai đầy đủ.
+Đã triển khai **B1–B5**: tạo đơn, QR động, scan, xác minh PIN và chuyển tiền giả lập
+trong một transaction Gateway/Bank. **Chưa triển khai B6–B8**.
 
 - [Đề bài chính thức](bai-tap-luong-thanh-toan-qr.md)
 - [Phân tích B1–B8, mô hình dữ liệu, transaction và các quyết định](docs/architecture.md)
@@ -13,6 +13,8 @@
 - [Báo cáo B3 và thiết kế quyền GET dùng chung](docs/phase3-report.md)
 - [Request B3](requests/b3.http)
 - [Thiết kế B4–B5](docs/b4-b5-design.md), [báo cáo mốc B4](docs/phase4-report.md)
+- [Báo cáo B5: transaction, concurrency, test và restart](docs/phase5-report.md)
+- [Request B4–B5](requests/b4-b5.http)
 
 ## Cấu trúc
 
@@ -34,7 +36,8 @@ src/main/java/vn/vnpay/qr/
     repository/                       JPA repository, sequence cấp orderId
     service/                          B1; điều phối B2 và transaction đọc/lưu riêng
   gateway/
-    api/                              POST payments; GET có phân quyền và ký response
+    api/                              POST payments, confirm; GET có phân quyền
+    bank/                             Account, ledger, Bank nội bộ cùng transaction
     domain/                           Merchant registry, PaymentTxn, PaymentStatus
     repository/                       Các repository chỉ Gateway sử dụng
     service/                          Tạo/replay và phục hồi unique-key race
@@ -45,10 +48,12 @@ src/main/java/vn/vnpay/qr/
     client/                           RestClient và DTO riêng của Wallet
     config/                           URL và credential đọc Gateway
     service/                          So amount, status và expireAt qua Clock
+    domain/, repository/              Wallet User, BCrypt hash và khóa PIN bền vững
 src/main/resources/
   application.yml
   application-dev.yml                 H2 file, H2 console local
-  schema.sql                          orders, merchant, payment_txn, hai sequence
+  schema.sql                          orders, merchant, payment_txn, wallet_user,
+                                      account, ledger_entry, idempotency, sequence
   data.sql                            Seed MC001 nếu chưa tồn tại
 src/test/java/vn/vnpay/qr/
   ApplicationContextTest.java
@@ -57,8 +62,11 @@ src/test/java/vn/vnpay/qr/
   gateway/CryptoAndQrTest.java
   gateway/GatewayPaymentApiIntegrationTest.java
   gateway/QrParserCompatibilityIT.java Kiểm tra ngoài qua API qr-parser gốc
+  gateway/ConfirmationIntegrationTest.java Money, concurrency, fault injection
+  gateway/RestartPersistenceIT.java    Hai process thật, HTTP và H2 file qua restart
   wallet/PaymentQrParserTest.java
   wallet/WalletScanHttpIntegrationTest.java
+  wallet/WalletPaymentHttpTest.java    PIN, counter, lock, HTTP timeout
 src/test/resources/application-test.yml
 docs/architecture.md
 requests/b1.http
@@ -67,8 +75,8 @@ requests/b3.http
 ```
 
 Merchant → Gateway hiện gọi qua HTTP thật, không import service/repository/entity
-của nhau. Bank sẽ nằm trong Gateway và dùng chung transaction cơ sở dữ liệu ở B5;
-chưa có Bank, account, ledger, wallet_user hoặc IPN.
+của nhau. Bank nằm trong Gateway và dùng chung transaction cơ sở dữ liệu ở B5;
+đã có Bank nội bộ, account, ledger và wallet_user; chưa có IPN.
 
 ## Chạy
 
@@ -326,6 +334,75 @@ Cấu hình `QR_WALLET_READ_TOKEN` ở hai phía (mẫu dev local mặc định
 body scan và không nằm trong QR. B7 mới có nền tảng GET có phân quyền; chưa triển
 khai workflow Merchant tra cứu đơn hay job hết hạn.
 
+## API B4–B5 — Thanh toán
+
+`POST /api/wallet/payments`:
+
+```json
+{
+  "userId":"U001",
+  "txnRef":"TX00000001",
+  "amount":55000,
+  "pin":"123456",
+  "requestId":"4f1c2a9e-7b3d-4c55-9a10-0e2b6f8d1a77"
+}
+```
+
+Wallet kiểm BCrypt, lấy payerAccount từ user, rồi gọi HTTP
+`POST /api/gateway/payments/{txnRef}/confirm` với body đúng hợp đồng:
+
+```json
+{"payerAccount":"1000001","amount":55000,"requestId":"4f1c2a9e-7b3d-4c55-9a10-0e2b6f8d1a77"}
+```
+
+Confirm bắt buộc `X-Wallet-Signature`: HMAC-SHA256 của các trường body cộng txnRef
+trong path, sort key và nối bằng &. Dùng secret riêng `QR_WALLET_PAYMENT_SECRET`
+(mẫu local `wallet-payment-secret-dev-only`), **không dùng token đọc B3**. PIN không
+gửi sang Gateway; client không thể thêm payerAccount vào request Wallet.
+
+200 SUCCESS (ví dụ):
+
+```json
+{
+  "txnRef":"TX00000001","status":"SUCCESS","amount":55000,
+  "bankRef":"BK20261112000001","paidAt":"2026-11-12T09:03:12+07:00",
+  "message":"Thanh toán thành công"
+}
+```
+
+Thiếu tiền trả 200 với status FAILED, amount, errorCode INSUFFICIENT_FUNDS và
+message; không bankRef/paidAt, không thay đổi số dư hoặc tạo ledger.
+
+| Trường hợp | HTTP / mã |
+|---|---|
+| PIN sai | 401 INVALID_PIN |
+| Lần sai thứ ba và trong 15 phút khóa | 423 PIN_LOCKED |
+| User không có | 404 WALLET_USER_NOT_FOUND |
+| Confirm thiếu/sai credential thanh toán | 401 INVALID_WALLET_CREDENTIALS |
+| Giao dịch không tồn tại | 404 TXN_NOT_FOUND |
+| Không còn PENDING | 422 TXN_NOT_PAYABLE |
+| PENDING đến/quá hạn, hoặc đã EXPIRED | 422 TXN_EXPIRED, lưu EXPIRED |
+| Amount khác DB | 422 AMOUNT_MISMATCH |
+| Account nguồn/đích không có | 404 ACCOUNT_NOT_FOUND, payment FAILED |
+| Account nguồn trùng đích | 422 INVALID_TRANSFER, payment giữ PENDING |
+| Cùng UUID nhưng khác txnRef/account/amount | 409 IDEMPOTENCY_CONFLICT |
+| Wallet timeout/kết nối/5xx/response không xác thực | 502 PAYMENT_RESULT_UNKNOWN |
+
+Với kết quả UNKNOWN, **giữ nguyên requestId/txnRef/amount để retry**; không tạo UUID
+mới và không kết luận FAILED. Gateway lưu status HTTP và body response cùng transaction
+tiền; replay không tạo bankRef/ledger mới. Không có auto retry vô hạn trong Wallet.
+
+Seed U001/PIN 123456/số dư 1.000.000; U002/PIN mẫu 123456/số dư 10.000;
+merchant account 9000001/số dư 0. PIN chỉ lưu BCrypt strength 10. Seed chỉ thêm khi
+thiếu, không reset số dư hoặc lock khi restart. PIN đúng reset counter; mỗi lần xác
+thực PIN sai được đếm, kể cả requestId được lặp, để không cho thử PIN vô hạn bằng
+cách tái sử dụng UUID. Khóa/bộ đếm commit trước khi trả lỗi và trước HTTP Gateway.
+
+Gateway khóa payment_txn và hai account theo thứ tự account_no cố định. Bank dùng
+propagation MANDATORY, cùng transaction JPA; debit, credit, hai ledger và cache kết
+quả hoặc commit tất cả, hoặc rollback tất cả. Lỗi hệ thống không được đổi thành
+thành công/thiếu tiền. Tại B5, Merchant vẫn WAITING_PAYMENT; chưa có IPN.
+
 ## Kiểm thử
 
 ```powershell
@@ -349,17 +426,18 @@ Kiểm tra Type04 bằng project gốc trong terminal khác, từ thư mục qr-
 java -jar target/qr-parser-0.0.1-SNAPSHOT.jar --server.port=8081
 ```
 
-Tại qr-payment-flow, chạy **toàn bộ B1+B2+B3 kèm kiểm chứng Type04**:
+Tại qr-payment-flow, chạy **toàn bộ B1–B5, Type04 và restart thật**:
 
 ```powershell
 .\mvnw.cmd "-Dtest=*Test,*IT" "-Dqr.parser.url=http://localhost:8081" test package
 ```
 
-Kết quả thực tế ngày 2026-11-12: **185 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
-118 test cũ và 67 test B3. `mvnw test` mặc định chạy 184 test nội bộ. `qr-parser`
+Kết quả thực tế ngày 2026-11-12: **219 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
+185 test B1–B3, 12 test B4 và 22 test B5. `mvnw test` mặc định chạy 217 test nội bộ;
+full command trên bao gồm hai lớp IT. `qr-parser`
 gốc trả HTTP 200, `status=VALID`, CRC VALID cho
 QR thực sự sinh bởi Gateway với `type="04"`. JAR đóng gói thành công. Đây chưa phải
-toàn bộ 12 kịch bản end-to-end B1–B8. Xem [báo cáo B3](docs/phase3-report.md).
+toàn bộ 12 kịch bản end-to-end B1–B8. Xem [báo cáo B5](docs/phase5-report.md).
 
 Môi trường triển khai hiện tại giới hạn ghi ngoài workspace, nên lệnh kiểm chứng dùng
 cache cục bộ (không thay đổi cấu hình Maven của người dùng):
@@ -376,6 +454,6 @@ trong wrapper properties, rồi nạp vào cache cục bộ. Các lần test sau
 
 ## Phạm vi còn lại
 
-Dừng tại B3. Chưa triển khai B4–B8: PIN, xác nhận thanh toán, chuyển tiền, IPN,
-workflow Merchant tra cứu, job hết hạn, đối soát hoặc hoàn tiền. Không có tự động
-retry nền phía Merchant; client gọi lại payments với cùng orderId để khôi phục.
+Dừng tại B5. Chưa có B6–B8: IPN/retry IPN, workflow Merchant tra cứu, job hết hạn,
+đối soát hoặc hoàn tiền. PaymentCompleted là event nội bộ; B6 tương lai cần listener
+AFTER_COMMIT và cơ chế giao nhận bền vững, hiện không có listener gửi HTTP.

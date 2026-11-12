@@ -1,0 +1,34 @@
+@baseUrl = http://localhost:8080
+# Thay bằng txnRef của QR còn PENDING từ B2.
+@txnRef = TX00000001
+@requestId = 4f1c2a9e-7b3d-4c55-9a10-0e2b6f8d1a77
+
+### B4: Wallet xác minh PIN và tự ký HTTP confirm sang Gateway
+POST {{baseUrl}}/api/wallet/payments
+Content-Type: application/json
+
+{"userId":"U001","txnRef":"{{txnRef}}","amount":55000,"pin":"123456","requestId":"{{requestId}}"}
+
+### Retry cùng một lần thanh toán: giữ nguyên toàn bộ thông tin và UUID
+POST {{baseUrl}}/api/wallet/payments
+Content-Type: application/json
+
+{"userId":"U001","txnRef":"{{txnRef}}","amount":55000,"pin":"123456","requestId":"{{requestId}}"}
+
+### PIN sai: 401 hai lần đầu, 423 lần thứ ba và khi đang khóa
+POST {{baseUrl}}/api/wallet/payments
+Content-Type: application/json
+
+{"userId":"U001","txnRef":"{{txnRef}}","amount":55000,"pin":"000000","requestId":"{{requestId}}"}
+
+### U002 thiếu tiền: cần txnRef mới còn PENDING và UUID mới
+POST {{baseUrl}}/api/wallet/payments
+Content-Type: application/json
+
+{"userId":"U002","txnRef":"{{txnRef}}","amount":55000,"pin":"123456","requestId":"81f52213-d6ad-4d72-bf50-cdaee49b6197"}
+
+### Confirm trực tiếp không có chữ ký service: 401, không chuyển tiền
+POST {{baseUrl}}/api/gateway/payments/{{txnRef}}/confirm
+Content-Type: application/json
+
+{"payerAccount":"1000001","amount":55000,"requestId":"{{requestId}}"}

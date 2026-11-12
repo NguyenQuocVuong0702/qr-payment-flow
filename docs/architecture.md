@@ -1,11 +1,11 @@
-# Phân tích và thiết kế — B1, B2, B3
+# Phân tích và thiết kế — B1–B5
 
 Tài liệu gốc: [bai-tap-luong-thanh-toan-qr.md](../bai-tap-luong-thanh-toan-qr.md).
 Khi có khác biệt, quy tắc nghiệp vụ, API, mã lỗi và kiểm thử trong đề được ưu tiên.
-Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1, B2 và B3. Phần B4–B8 bên dưới
+Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1–B5. Phần B6–B8 bên dưới
 vẫn là thiết kế cho các giai đoạn sau, chưa có API hay nghiệp vụ tương ứng.
 Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md) và
-[báo cáo B3](phase3-report.md).
+[báo cáo B3](phase3-report.md), [B4](phase4-report.md) và [B5](phase5-report.md).
 
 ## 1. Quan hệ B1–B8
 
@@ -50,18 +50,19 @@ Chưa thêm broker, cache, service discovery, OAuth, frontend hoặc thư viện
 
 Đã tạo `orders`, `merchant`, `payment_txn`, sequence `merchant_order_seq` và
 `gateway_txn_seq`. `data.sql` nạp MC001 nếu thiếu, không ghi đè registry đã có.
-Account, ledger, Wallet và IPN chưa có DDL/entity/seed.
+Đã bổ sung wallet_user, account, ledger_entry, idempotency và bank_ref_seq. IPN
+chưa có DDL/entity/job. Seed User/Bank chỉ insert khi thiếu, không reset khi restart.
 
 | Bảng / chủ sở hữu | Khóa, cột chính và quan hệ dự kiến |
 |---|---|
 | `orders` / Merchant — đã tạo | PK `order_id`; merchant_id; BIGINT amount; VARCHAR(19) description; status; nullable UNIQUE txn_ref; created_at; nullable paid_at; version cho optimistic locking |
-| `merchant` / Gateway — đã tạo | PK merchant_id; name, city, mcc, secret_key, ipn_url; account_no hiện là giá trị, chưa FK vì Bank chưa triển khai |
-| `payment_txn` / Gateway — đã tạo | PK txn_ref; merchant_id FK → merchant; UNIQUE(merchant_id, order_id); amount, description, status, qr_string, expire_at; nullable payer_account, UNIQUE bank_ref, fail_reason, paid_at; created_at và version. FK account và index tra cứu/hết hạn sẽ thêm khi có B5/B7/B8 |
-| `account` / Bank trong Gateway | PK account_no; owner_name; balance BIGINT CHECK balance >= 0; version |
-| `ledger_entry` / Bank | PK id; bank_ref; account_no FK → account; direction DEBIT/CREDIT; amount > 0; created_at; UNIQUE(bank_ref, direction) để không lặp bút toán |
-| `wallet_user` / Wallet | PK user_id; full_name; account_no tham chiếu logic; pin_hash BCrypt; bổ sung failed_pin_attempts, pin_locked_until để khóa 15 phút bền vững |
+| `merchant` / Gateway — đã tạo | PK merchant_id; name, city, mcc, secret_key, ipn_url; account_no là giá trị. B5 kiểm account tồn tại dưới khóa Bank, không FK metadata để bảo toàn registry B2 |
+| `payment_txn` / Gateway — đã tạo | PK txn_ref; merchant_id FK → merchant; UNIQUE(merchant_id, order_id); amount, description, status, qr_string, expire_at; nullable payer_account, UNIQUE bank_ref, fail_reason, paid_at; created_at/version. Index tra cứu/hết hạn sẽ thêm khi có B7/B8 |
+| `account` / Bank — đã có | PK account_no; owner_name; balance BIGINT CHECK balance >= 0; version |
+| `ledger_entry` / Bank — đã có | PK id; txn_ref FK → payment_txn; bank_ref; account_no FK → account; DEBIT/CREDIT; amount > 0; created_at; UNIQUE(bank_ref,direction), UNIQUE(txn_ref,direction) |
+| `wallet_user` / Wallet — đã có | PK user_id; full_name; account_no tham chiếu logic; pin_hash BCrypt; failed_pin_attempts, pin_locked_until, version |
 | `ipn_log` / Gateway | PK id; txn_ref FK → payment_txn; attempt, request_body, response_code, sent_at; UNIQUE(txn_ref, attempt) |
-| `idempotency` / Gateway | PK request_id; txn_ref FK → payment_txn; response_body, created_at; bổ sung fingerprint của txnRef/payerAccount/amount và HTTP status để phát hiện tái sử dụng sai khóa |
+| `idempotency` / Gateway — đã có | PK request_id kiểu UUID; txn_ref tham chiếu logic để lưu cả TXN_NOT_FOUND; payer_account/amount làm fingerprint cùng txn_ref; http_status/response_body, created_at/version |
 
 Quan hệ qua ranh giới thành phần là tham chiếu bằng giá trị, không phải JPA association
 hoặc FK: orders.merchant_id/order_id/txn_ref và wallet_user.account_no. Merchant không
@@ -94,30 +95,30 @@ nâng cấp một bảng cũ. Chưa cần thêm Flyway cho một phiên bản sc
   đó rồi đọc giao dịch thắng trong transaction mới, tránh dùng transaction đã lỗi.
   Cùng orderId/PENDING cùng amount trả giao dịch cũ, giữ nguyên QR và hạn; khác amount
   trả đúng 409 ORDER_CONFLICT. Không tự tạo giao dịch thứ hai cho đơn đã terminal.
-- **B5 dự kiến:** READ_COMMITTED + PESSIMISTIC_WRITE payment_txn; khóa hai account
+- **B5 đã triển khai:** READ_COMMITTED + PESSIMISTIC_WRITE payment_txn; khóa hai account
   theo account_no tăng dần, kể cả hai txn khác nhau cùng sử dụng một tài khoản.
   Bank dùng propagation MANDATORY để không vô tình chạy ngoài transaction confirm.
   Không dùng REQUIRES_NEW cho chuyển tiền. Có version account như đề, khóa bi quan
   là cơ chế chính; không retry ghi tiền mù quáng khi gặp optimistic conflict.
-- Tra idempotency đầu tiên, khóa payment_txn rồi tra lại requestId để request trùng
-  đang chờ thấy kết quả đã commit. UNIQUE request_id còn bảo vệ trường hợp cùng khóa
-  được dùng cho hai txn khác nhau: giao dịch thua phải rollback toàn bộ, sau đó đọc
-  kết quả trong transaction mới và kiểm fingerprint. Không để exception constraint
-  bị nuốt rồi commit phần tiền. Dùng outcome để trả lỗi nghiệp vụ hết hạn sau commit,
+- Tra idempotency đầu tiên rồi reserve UUID bằng insert unique cùng transaction,
+  trước khi khóa payment_txn. Request trùng chờ PK insert rồi rollback transaction
+  thua, đọc winner trong transaction mới và kiểm fingerprint. Khóa UUID trước cũng
+  chặn cùng requestId dùng cho hai txn khác nhau. Không nuốt exception constraint
+  trong transaction rollback-only. Dùng outcome để trả lỗi hết hạn sau commit,
   tránh throw RuntimeException làm rollback mất thay đổi EXPIRED.
 - Thiếu số dư trả outcome FAILED và lưu kết quả idempotency cùng transaction. Lỗi hạ
   tầng bất ngờ khi cập nhật account/ledger phải rollback tất cả; không catch exception
   rồi commit nửa lần chuyển tiền. Nếu cần ghi FAILED do Bank lỗi, chỉ thực hiện sau
   khi chắc chắn toàn bộ chuyển tiền đã rollback, trong transaction xử lý riêng.
-- B5 phải test tổng số dư không đổi, đúng cặp ledger DEBIT/CREDIT, tối đa một bank_ref
+- B5 đã test tổng số dư không đổi, đúng cặp ledger DEBIT/CREDIT, tối đa một bank_ref
   cho mỗi txnRef, replay giống kết quả gốc và tranh chấp hai requestId khác nhau.
 - HTTP qua `RestClient`: connect timeout 3s, read timeout 5s, không tự follow redirect.
-  B1 chưa phát sinh HTTP liên thành phần. B2 đã dùng RestClient, B4 là dự kiến.
+  B1 chưa phát sinh HTTP liên thành phần. B2, B3 và B4 đã dùng RestClient.
   Chỉ retry với khóa nghiệp vụ giữ nguyên;
   timeout không đồng nghĩa thất bại thanh toán. Không giữ transaction/khóa DB khi gọi
   HTTP. Merchant gọi Gateway xong mới cập nhật local, có thể khôi phục qua replay/B7.
 
-## 4. HMAC, QR đã triển khai; PIN, IPN và đối soát là dự kiến
+## 4. HMAC, QR, PIN đã triển khai; IPN và đối soát là dự kiến
 
 **HMAC B2 đã triển khai:** dùng UTF-8; bỏ signature; sort tên trường tăng dần; nối key=value bằng &,
 không URL-encode, không đổi khoảng trắng hay format timestamp trong lúc verify;
@@ -140,8 +141,8 @@ HTTP 200, status VALID, CRC VALID. Không dùng parser tự viết để xác nh
 
 **PIN:** Wallet dùng BCrypt, không đưa PIN sang Gateway; khóa user khi cập nhật số lần
 sai để hai request không vượt bộ đếm. Lần sai thứ ba trả 423 PIN_LOCKED, khóa 15 phút;
-thành công hoặc hết thời gian khóa reset bộ đếm theo quy tắc sẽ ghi rõ ở B4.
-Chưa có wallet_user, PIN hash hoặc tài khoản ngân hàng trong giai đoạn 1.
+thành công hoặc hết thời gian khóa reset bộ đếm. B4 lưu wallet_user bền vững và B5
+có account/ledger. PIN đúng mới được gọi HTTP, không gửi PIN sang Gateway.
 
 **IPN:** không HTTP trong transaction B5. Dự kiến tạo một bản ghi công việc IPN bền
 vững cùng transaction kết quả; sau commit worker quét/gửi. Có thể dùng một bảng nhỏ
@@ -172,8 +173,8 @@ API báo cáo; nếu bật sửa missingInMerchant, phải verify B7 có HMAC v�
 | “Mọi thao tác ghi idempotent” nhưng B1 không có khóa client | Giữ đúng API B1, không thêm body/header. Hai POST có amount/description giống nhau là hai đơn. Không thể phân biệt retry với mua hàng mới; không dùng hash body để gộp đơn. Đây là giới hạn hợp đồng gốc; muốn retry B1 an toàn phải thống nhất thêm client request key ở một thay đổi yêu cầu riêng. B2/B5 áp dụng đầy đủ khóa orderId/requestId của đề |
 | Cách Merchant kích hoạt B2 chưa có endpoint | Đã chọn POST /api/merchant/orders/{orderId}/payments, body chỉ expireMinutes. B1 giữ nguyên CREATED; amount/description/merchantId lấy từ DB, trường lạ bị từ chối |
 | B2 cùng orderId/PENDING nhưng đổi description/hạn | Nếu amount không đổi, ưu tiên quy tắc trả đúng txn cũ; không sửa payload/QR/hạn. Với trạng thái terminal không tạo txn mới, dự kiến trả trạng thái txn hiện có |
-| B3 nói quá hạn → TXN_NOT_PAYABLE, bảng lỗi và test #8 dùng TXN_EXPIRED | B3 hiện dùng TXN_EXPIRED khi trạng thái EXPIRED hoặc PENDING đến/quá expireAt; terminal khác dùng TXN_NOT_PAYABLE. B5/test #8 vẫn là thiết kế tương lai |
-| Cùng requestId nhưng khác txn/account/amount | Không thực hiện lại, kiểm fingerprint; cần chốt mã lỗi cho việc sử dụng sai khóa khi triển khai B5 vì đề chưa có mã dành cho trường hợp này |
+| B3 nói quá hạn → TXN_NOT_PAYABLE, bảng lỗi và test #8 dùng TXN_EXPIRED | B3 dùng TXN_EXPIRED khi EXPIRED hoặc PENDING đến/quá expireAt; terminal khác dùng TXN_NOT_PAYABLE. B5 hiện commit EXPIRED khi confirm hết hạn, đã có test #8 tương ứng |
+| Cùng requestId nhưng khác txn/account/amount | B5 trả 409 IDEMPOTENCY_CONFLICT; không chuyển tiền lại và không trả dữ liệu outcome của payload khác |
 | Chữ ký response, query GET chưa minh họa | Quy tắc mọi tin Merchant–Gateway có HMAC: request GET ký merchantId + txnRef, reconciliation ký date + merchantId, đặt ở X-Signature; response ký toàn bộ JSON, đặt ở X-Signature để giữ nguyên JSON đề. Với giá trị array/object của B8, dùng JSON compact UTF-8, sort key đệ quy, giữ thứ tự array; Gateway sort transactions theo txnRef trước khi tạo response. Hai bên cần test vector chung ở B8; không tự bỏ ký response |
 | Wallet gọi GET Gateway trong B3 nhưng B7 nêu header Merchant | GET hiện phân biệt bằng credential đã xác thực: Wallet dùng Bearer token riêng, chỉ projection xác nhận; Merchant bắt buộc HMAC và quyền sở hữu. Header Merchant thiếu/sai/mixed không fallback Wallet. Không dùng query caller hoặc header vai trò tự khai để bỏ qua HMAC |
 | “3 lần” IPN nhưng liệt kê 3 khoảng chờ | Chọn tổng 3 lần gửi, chờ lần lượt 10s, 30s, 60s trước mỗi lần thử (mốc sớm nhất sau commit +10s, +40s, +100s, chưa kể thời gian HTTP); không gửi lần thứ tư. Có cấu hình rút ngắn trong test. Đáp ứng kịch bản #9 ba dòng log; ghi rõ trước B6 |
@@ -309,5 +310,54 @@ sequenceDiagram
 Kết quả B3: 185 test PASS (118 cũ + 67 mới), không failure/error/skipped. Chưa có
 full flow B1–B8; các ca CRC sửa tên và sửa amount rồi tính lại CRC ở B3 đã được test.
 
-Dừng B3: GET chỉ là nền tảng cần cho B3 và bảo vệ sẵn cho B7; chưa có workflow B7,
-job hết hạn, B4 xác nhận/PIN, Bank, IPN, đối soát hoặc hoàn tiền.
+Mốc B3 giữ nguyên API. GET chỉ là nền tảng cần cho B3/B7, chưa có workflow B7/job hết hạn.
+
+## 10. B4–B5: transaction, idempotency và khóa tiền
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Wallet
+    participant G as Gateway
+    participant B as Bank nội bộ
+    C->>W: POST payments (PIN, requestId)
+    W->>W: Transaction khóa User, kiểm BCrypt, commit counter/lock
+    W->>G: HTTP confirm + HMAC thanh toán, không có PIN
+    G->>G: Xác thực service, transaction reserve UUID, khóa payment_txn
+    G->>B: MANDATORY: khóa account theo thứ tự PK
+    B->>B: Debit + credit + DEBIT/CREDIT ledger trong cùng transaction
+    B-->>G: bankRef hoặc thiếu tiền
+    G->>G: Lưu state + paidAt + response idempotency, commit
+    G-->>W: Kết quả xác thực hoặc chưa biết nếu mất mạng
+    W-->>C: SUCCESS/FAILED hoặc retry cùng UUID
+```
+
+- B4 lỗi PIN trả outcome khỏi transaction rồi mới throw lỗi API, nên bộ đếm không
+  bị rollback. Khóa User bằng DB, mọi lần xác thực sai đều đếm, kể cả cùng UUID.
+  PIN đúng reset counter; khóa 15 phút dùng Clock. BCrypt strength 10, không raw PIN.
+- HMAC confirm dùng secret riêng QR_WALLET_PAYMENT_SECRET và canonical body cộng
+  txnRef. Không cho dùng credential đọc, header Merchant hay nhiều signature. Body
+  được ký ràng buộc account nguồn/amount/UUID/path; account chỉ từ User đã xác minh.
+- ConfirmationTransaction dùng READ_COMMITTED; GatewayConfirmationService dùng
+  NEVER. Bank MANDATORY tham gia cùng datasource/transaction manager; không HTTP
+  hoặc gọi service Merchant trong transaction Bank.
+- Reserve row UUID chưa có response trong transaction chưa commit. Mọi outcome
+  nghiệp vụ đi qua finish lưu cả HTTP status/body; lỗi hệ thống rollback cả
+  reservation/payment/account/ledger. Cache không FK txn_ref để lưu TXN_NOT_FOUND.
+- Cùng UUID/payload trả nguyên status/body; không bankRef/event thêm. UUID khác
+  payload → 409 IDEMPOTENCY_CONFLICT; khác UUID/cùng txn bị payment lock chặn chuyển
+  lần hai. Fingerprint là bộ giá trị txnRef/payerAccount/amount, không hash gần đúng.
+- Account khóa theo PK tăng dần, có version bổ trợ, không synchronized. Kiểm số dư
+  trước debit; Math.addExact chặn credit overflow. Flush không commit: lỗi xảy ra
+  sau debit/credit/ledger/cache vẫn rollback được mọi bảng.
+- Thiếu tiền: FAILED + 200 INSUFFICIENT_FUNDS, không ledger. Thiếu account: FAILED +
+  404 ACCOUNT_NOT_FOUND, không ledger. Source=destination: 422 INVALID_TRANSFER trước
+  PROCESSING. Lỗi hệ thống: rollback về PENDING; retry cùng UUID an toàn.
+- Hết hạn commit EXPIRED và outcome 422. Amount mismatch giữ PENDING, cache lỗi 422.
+  Clock kiểm sau payment lock; không cache lỗi hệ thống chưa hoàn tất.
+- PaymentCompleted được publish trong transaction; B6 tương lai dùng listener
+  AFTER_COMMIT và giao nhận bền vững. Hiện chưa có IPN, retry job hoặc outbox.
+
+219 test PASS: 185 B1–B3, 12 B4, 22 B5. Test B5 gồm 21 money/concurrency và một IT
+restart hai process production thật/H2 file. Xem [báo cáo B5](phase5-report.md).
+Dừng B5; Merchant có thể tiếp tục WAITING_PAYMENT cho đến B6/B7.

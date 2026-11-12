@@ -67,6 +67,16 @@ public class PaymentTxn {
     }
 
     public String getTxnRef() { return txnRef; }
+    public void startProcessing(String payerAccount) { transition(PaymentStatus.PROCESSING); this.payerAccount = payerAccount; }
+    public void expire() { transition(PaymentStatus.EXPIRED); }
+    public void fail(String reason) { transition(PaymentStatus.FAILED); failReason = reason; }
+    public void succeed(String bankRef, Instant paidAt) {
+        transition(PaymentStatus.SUCCESS); this.bankRef = bankRef; this.paidAt = paidAt;
+    }
+    private void transition(PaymentStatus next) {
+        if (!status.canTransitionTo(next)) throw new IllegalStateException("Invalid payment state transition");
+        status = next;
+    }
     public String getMerchantId() { return merchantId; }
     public String getOrderId() { return orderId; }
     public long getAmount() { return amount; }
