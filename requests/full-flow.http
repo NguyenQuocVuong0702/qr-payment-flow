@@ -1,0 +1,64 @@
+# Demo cho VS Code REST Client: thực thi lần lượt từng request có tên.
+# Không cần ký thủ công; Merchant và Wallet tự ký các HTTP nội bộ đúng credential.
+@baseUrl = http://localhost:8080
+# Đặt ngày theo paidAt tại Việt Nam của lần chạy thực tế.
+@date = 2026-11-13
+# Đổi UUID khi bắt đầu một demo/đơn mới; giữ nguyên UUID nếu retry cùng lần thanh toán.
+@requestId = d98b842e-463f-4559-8997-dcce0d24bc41
+
+### B1: tạo đơn CREATED; description <=19
+# @name createOrder
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":55000,"description":"Ao thun"}
+
+### B2: Merchant gọi Gateway qua HTTP, lưu txnRef và WAITING_PAYMENT
+# @name createPayment
+POST {{baseUrl}}/api/merchant/orders/{{createOrder.response.body.$.orderId}}/payments
+Content-Type: application/json
+
+{"expireMinutes":15}
+
+### B3: Wallet phân tích QR B2 và xác minh lại qua HTTP Gateway
+# @name scanQr
+POST {{baseUrl}}/api/wallet/scan
+Content-Type: application/json
+
+{"userId":"U001","qrString":"{{createPayment.response.body.$.qrString}}"}
+
+### B4-B5: PIN -> HTTP confirm -> một transaction tiền/ledger/idempotency/outbox
+# @name pay
+POST {{baseUrl}}/api/wallet/payments
+Content-Type: application/json
+
+{"userId":"U001","txnRef":"{{createPayment.response.body.$.txnRef}}","amount":55000,"pin":"123456","requestId":"{{requestId}}"}
+
+### B6 chạy tự động sau commit: chờ worker poll khoảng 1s rồi xem đơn
+# Nếu còn WAITING_PAYMENT, gọi lại GET; trong H2 xem ipn_outbox/ipn_log đã redacted.
+# @name orderAfterIpn
+GET {{baseUrl}}/api/merchant/orders/{{createOrder.response.body.$.orderId}}
+
+### B7: chủ động sync khi IPN bị mất; thao tác riêng, terminal là no-op
+# @name syncOrder
+POST {{baseUrl}}/api/merchant/orders/{{createOrder.response.body.$.orderId}}/sync
+
+### B8: matched=1 cho một demo duy nhất trong DB/ngày; đơn khác cùng ngày cũng được đối soát
+# @name reconcile
+POST {{baseUrl}}/api/merchant/reconcile
+Content-Type: application/json
+
+{"date":"{{date}}"}
+
+### Retry B4-B5 cùng UUID: tiền/ledger/bankRef không thay đổi
+# @name retryPayment
+POST {{baseUrl}}/api/wallet/payments
+Content-Type: application/json
+
+{"userId":"U001","txnRef":"{{createPayment.response.body.$.txnRef}}","amount":55000,"pin":"123456","requestId":"{{requestId}}"}
+
+### Retry đối soát: chỉ đọc, không sửa đơn hoặc tiền
+POST {{baseUrl}}/api/merchant/reconcile
+Content-Type: application/json
+
+{"date":"{{date}}"}

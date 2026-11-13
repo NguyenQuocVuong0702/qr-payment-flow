@@ -1,12 +1,12 @@
-# Phân tích và thiết kế — B1–B7
+# Phân tích và thiết kế — B1–B8
 
 Tài liệu gốc: [bai-tap-luong-thanh-toan-qr.md](../bai-tap-luong-thanh-toan-qr.md).
 Khi có khác biệt, quy tắc nghiệp vụ, API, mã lỗi và kiểm thử trong đề được ưu tiên.
-Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1–B7. B8 vẫn là thiết kế
-cho giai đoạn sau, chưa có API/workflow đối soát.
+Tài liệu này phân tích B1–B8; code hiện tại thực hiện đủ tám bước, gồm đối soát chỉ
+đọc. Không triển khai refund hoặc phần mở rộng ngoài đề.
 Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md) và
 [báo cáo B3](phase3-report.md), [B4](phase4-report.md), [B5](phase5-report.md)
-và [B6](phase6-report.md), [B7](phase7-report.md).
+và [B6](phase6-report.md), [B7](phase7-report.md), [B8](phase8-report.md).
 
 ## 1. Quan hệ B1–B8
 
@@ -56,9 +56,9 @@ IPN. Seed User/Bank chỉ insert khi thiếu, không reset khi restart.
 
 | Bảng / chủ sở hữu | Khóa, cột chính và quan hệ dự kiến |
 |---|---|
-| `orders` / Merchant — đã tạo | PK `order_id`; merchant_id; BIGINT amount; VARCHAR(19) description; status; nullable UNIQUE txn_ref; created_at; nullable paid_at; version cho optimistic locking |
+| `orders` / Merchant — đã tạo | PK `order_id`; merchant_id; BIGINT amount; VARCHAR(19) description; status; nullable UNIQUE txn_ref; created_at; nullable paid_at; version cho optimistic locking; index B8(merchant_id,status,paid_at) |
 | `merchant` / Gateway — đã tạo | PK merchant_id; name, city, mcc, secret_key, ipn_url; account_no là giá trị. B5 kiểm account tồn tại dưới khóa Bank, không FK metadata để bảo toàn registry B2 |
-| `payment_txn` / Gateway — đã tạo | PK txn_ref; merchant_id FK → merchant; UNIQUE(merchant_id, order_id); amount, description, status, qr_string, expire_at; nullable payer_account, UNIQUE bank_ref, fail_reason, paid_at; created_at/version. B7 thêm index(status,expire_at) |
+| `payment_txn` / Gateway — đã tạo | PK txn_ref; merchant_id FK → merchant; UNIQUE(merchant_id, order_id); amount, description, status, qr_string, expire_at; nullable payer_account, UNIQUE bank_ref, fail_reason, paid_at; created_at/version. B7 index(status,expire_at), B8 index(merchant_id,status,paid_at) |
 | `account` / Bank — đã có | PK account_no; owner_name; balance BIGINT CHECK balance >= 0; version |
 | `ledger_entry` / Bank — đã có | PK id; txn_ref FK → payment_txn; bank_ref; account_no FK → account; DEBIT/CREDIT; amount > 0; created_at; UNIQUE(bank_ref,direction), UNIQUE(txn_ref,direction) |
 | `wallet_user` / Wallet — đã có | PK user_id; full_name; account_no tham chiếu logic; pin_hash BCrypt; failed_pin_attempts, pin_locked_until, version |
@@ -120,7 +120,7 @@ nâng cấp một bảng cũ. Chưa cần thêm Flyway cho một phiên bản sc
   timeout không đồng nghĩa thất bại thanh toán. Không giữ transaction/khóa DB khi gọi
   HTTP. Merchant gọi Gateway xong mới cập nhật local, có thể khôi phục qua replay/B7.
 
-## 4. HMAC, QR, PIN, IPN đã triển khai; đối soát là dự kiến
+## 4. HMAC, QR, PIN, IPN và đối soát
 
 **HMAC B2 đã triển khai:** dùng UTF-8; bỏ signature; sort tên trường tăng dần; nối key=value bằng &,
 không URL-encode, không đổi khoảng trắng hay format timestamp trong lúc verify;
@@ -158,8 +158,8 @@ amount, txnRef và trạng thái trước khi cập nhật. Chi tiết và giớ
 **Đối soát:** danh sách SUCCESS theo paid_at trong khoảng [đầu ngày +07, đầu ngày kế
 tiếp +07), cộng long; Merchant lấy snapshot local và dữ liệu Gateway qua HTTP ngoài
 transaction ghi. Map theo txnRef, phân biệt missingInMerchant/missingInGateway/
-amountMismatch; amountMismatch không đồng thời đếm matched. Chưa tự sửa dữ liệu trong
-API báo cáo; nếu bật sửa missingInMerchant, phải verify B7 có HMAC và cập nhật có khóa.
+amountMismatch; amountMismatch không đồng thời đếm matched hoặc missing. API báo cáo
+không ghi dữ liệu. Sửa missingInMerchant bằng thao tác POST sync B7 riêng, có HMAC và khóa.
 
 ## 5. Điểm chưa rõ và quyết định
 
@@ -176,7 +176,7 @@ API báo cáo; nếu bật sửa missingInMerchant, phải verify B7 có HMAC v�
 | B2 cùng orderId/PENDING nhưng đổi description/hạn | Nếu amount không đổi, ưu tiên quy tắc trả đúng txn cũ; không sửa payload/QR/hạn. Với trạng thái terminal không tạo txn mới, dự kiến trả trạng thái txn hiện có |
 | B3 nói quá hạn → TXN_NOT_PAYABLE, bảng lỗi và test #8 dùng TXN_EXPIRED | B3 dùng TXN_EXPIRED khi EXPIRED hoặc PENDING đến/quá expireAt; terminal khác dùng TXN_NOT_PAYABLE. B5 hiện commit EXPIRED khi confirm hết hạn, đã có test #8 tương ứng |
 | Cùng requestId nhưng khác txn/account/amount | B5 trả 409 IDEMPOTENCY_CONFLICT; không chuyển tiền lại và không trả dữ liệu outcome của payload khác |
-| Chữ ký response, query GET chưa minh họa | Quy tắc mọi tin Merchant–Gateway có HMAC: request GET ký merchantId + txnRef, reconciliation ký date + merchantId, đặt ở X-Signature; response ký toàn bộ JSON, đặt ở X-Signature để giữ nguyên JSON đề. Với giá trị array/object của B8, dùng JSON compact UTF-8, sort key đệ quy, giữ thứ tự array; Gateway sort transactions theo txnRef trước khi tạo response. Hai bên cần test vector chung ở B8; không tự bỏ ký response |
+| Chữ ký response, query GET chưa minh họa | Mọi tin Merchant–Gateway có HMAC: GET ký merchantId + txnRef, reconciliation ký date + merchantId, đặt ở X-Signature; response ký toàn bộ JSON để giữ nguyên body đề. Array/object B8 dùng JSON compact UTF-8, sort key đệ quy, giữ array order; Gateway sort transactions theo txnRef. Đã có vector B8 đối chiếu Python độc lập |
 | Wallet gọi GET Gateway trong B3 nhưng B7 nêu header Merchant | GET hiện phân biệt bằng credential đã xác thực: Wallet dùng Bearer token riêng, chỉ projection xác nhận; Merchant bắt buộc HMAC và quyền sở hữu. Header Merchant thiếu/sai/mixed không fallback Wallet. Không dùng query caller hoặc header vai trò tự khai để bỏ qua HMAC |
 | “3 lần” IPN nhưng liệt kê 3 khoảng chờ | Yêu cầu B6 mới làm rõ: tổng 3 attempt, lần đầu ngay khi worker claim sau commit, lần hai +10s, lần ba +30s từ kết thúc lần trước; mốc 0/10/40 nếu HTTP tức thời. Không lần thứ tư; thay quyết định dự kiến trước B6 |
 | Dữ liệu mẫu U002 thiếu PIN và full_name | Seed ở B4/B5; chọn tên mô tả và PIN giả lập 123456 cho U002, BCrypt khi lưu, ghi rõ seed. Chưa seed các thành phần ngoài B1 |
@@ -244,8 +244,8 @@ sequenceDiagram
   chọn, nên response này không có chữ ký. Merchant không phản chiếu nội dung lỗi
   chưa xác thực và không dùng chúng để thay đổi đơn. Error xác thực được chỉ chuyển
   tiếp mã whitelist với HTTP tương ứng, không phản chiếu message Gateway tùy ý.
-- HMAC hiện hỗ trợ các giá trị scalar của B2, null optional bỏ qua. Array/object
-  canonical JSON của B8 vẫn là thiết kế tương lai. DTO request và config có secret
+- HMAC giữ nguyên giá trị scalar B2, null optional bỏ qua ở root. B8 dùng JSON compact
+  cho array/object, sort key đệ quy và giữ thứ tự array. DTO request và config có secret
   được redact toString; giảm log Spring web/HTTP/SQL-init để không log signature hay
   literal secret trong seed. Không tạo endpoint hiển thị registry/secret.
 - Seed MC001 theo đề, account_no chỉ metadata, không tạo account hay chuyển tiền.
@@ -410,7 +410,7 @@ sequenceDiagram
   xuyên HTTP để cố tạo exactly-once qua mạng.
 - SQL B6 chỉ thêm hai bảng/index, không tự tạo IPN cho các giao dịch terminal có
   trước nâng cấp. H2 restart thật đã được kiểm thử; PostgreSQL chưa được chạy.
-  B8, vận hành requeue EXHAUSTED và retention audit chưa triển khai. B7 chủ động
+  Vận hành requeue EXHAUSTED và retention audit chưa triển khai. B7 chủ động
   đồng bộ đơn sau IPN lỗi và bỏ chữ ký khỏi log, giữ nguyên outbox đã ký.
 
 Lệnh, kết quả kiểm thử và phân loại ca nằm trong [báo cáo B6](phase6-report.md).
@@ -458,3 +458,64 @@ Lệnh, kết quả kiểm thử và phân loại ca nằm trong [báo cáo B6](
   đồng thời với redaction. Outbox giữ byte-for-byte payload đã ký; không đổi retry.
 
 Phân loại kiểm thử, lệnh chạy và giới hạn ở [báo cáo B7](phase7-report.md).
+
+## 13. B8: đối soát cuối ngày qua HTTP
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant M as Merchant
+    participant G as Gateway
+    C->>M: POST /api/merchant/reconcile {date}
+    M->>G: HTTP GET reconciliation?merchantId&date + HMAC
+    G->>G: Authenticate Merchant; transaction đọc một tập SUCCESS theo paidAt
+    G-->>M: Summary + transactions theo txnRef + X-Signature
+    M->>M: Verify HMAC/schema/uniqueness/count/total/date
+    M->>M: Transaction đọc snapshot PAID và binding local, kết thúc
+    M->>M: Map theo txnRef: matched, missing hai phía, amountMismatch
+    M-->>C: Đúng bảy trường báo cáo, không ghi trạng thái/tiền
+```
+
+- BusinessDay dùng Asia/Ho_Chi_Minh, [đầu ngày, đầu ngày kế tiếp); hai phía lọc paidAt,
+  không createdAt hoặc ngày UTC. Ngày request bắt buộc yyyy-MM-dd có ngày lịch hợp lệ.
+- GatewayReconciliationController tái sử dụng PaymentLookupAccess.authenticateMerchant;
+  B7 cũng dùng helper này trong nhánh Merchant, Wallet B3 giữ nguyên nhánh credential riêng.
+  B8 bắt buộc đúng một merchantId/date query, X-Merchant-Id khớp query, không mixed/
+  duplicate header. Request ký date + merchantId. Lỗi sau xác thực và response thành
+  công đều ký/no-store qua LookupResponseSigningAdvice đã có.
+- Gateway đọc một danh sách SUCCESS trong read-only transaction, sort txnRef và tính
+  count/total từ đúng danh sách đó, không chạy count/sum ở snapshot SQL khác. DTO
+  chỉ có merchantId/date/successCount/successAmount/transactions và sáu trường mỗi txn.
+- HmacSigner mở rộng container theo quyết định có từ B1: root vẫn sort key=value,
+  bỏ signature/null; container dùng compact JSON sort key đệ quy, giữ array order và
+  null bên trong JSON. Không đổi chữ ký scalar B1–B7. Có vector HMAC độc lập Python.
+- GatewayPaymentClient dùng lại RestClient B7, timeout 3s/5s cả headers/body, không
+  redirect; B8 giới hạn 4 MiB. Verify chữ ký trên JSON gốc trước deserialize. DTO
+  GatewayReconciliation thuộc Merchant, schema whitelist bắt buộc đầy đủ trường,
+  merchant/date đúng, SUCCESS/amount/paidAt hợp lệ, không trùng txnRef/orderId/bankRef,
+  count và total chính xác. Không chuyển HTTP lỗi thành báo cáo rỗng.
+- MerchantReconciliationService NEVER, không mở transaction xuyên HTTP. Store chỉ
+  đọc sau khi response đã được xác thực. Một query lấy PAID của ngày và các binding
+  liên quan theo orderId/txnRef để phát hiện định danh tráo; không đọc Gateway repo.
+  Đơn CREATED chưa attach txnRef hoặc chưa tồn tại local vẫn có thể là missingInMerchant.
+- So sánh bằng HashMap/LinkedHashMap, O(n+m) ngoài chi phí query/sắp xếp DB. Common
+  txnRef nhưng orderId khác bị từ chối; lệch amount là dữ liệu đối soát, không coi là
+  lỗi HMAC. Chỉ các thành viên trong tập PAID/ngày được so amount với tập SUCCESS/ngày.
+  Mỗi txn chỉ thuộc một nhóm; totals là tổng độc lập hai tập bằng long/Math.addExact.
+- missingInMerchant/missingInGateway dùng {txnRef,orderId,amount}; amountMismatch dùng
+  {txnRef,orderId,gatewayAmount,merchantAmount}, vì đề chưa định nghĩa phần tử mảng này.
+  Response ngoài giữ đúng date/matched/missingInMerchant/missingInGateway/amountMismatch/
+  gatewayTotal/merchantTotal, không thêm metadata nội bộ.
+- PAID thiếu paidAt hoặc txnRef hợp lệ không thể gán ngày/định danh: trả 409
+  INVALID_MERCHANT_DATA thay vì bỏ qua. Nếu paidAt local và Gateway thuộc hai ngày
+  khác nhau, mỗi báo cáo phản ánh tập của ngày mình, không đếm matched xuyên ngày.
+- Đối soát là read-only; không gọi sync, Bank, ledger, idempotency hoặc thay bankRef.
+  Hai snapshot phân tán không có atomic snapshot chung; thanh toán/IPN đang chạy có
+  thể tạo lệch tạm thời, cần chạy lại sau khi ổn định. Không tạo distributed transaction.
+- DDL B8 chỉ thêm hai index, không đổi bảng hoặc dữ liệu tài chính. Không lưu bảng
+  reconciliation_run, không thêm scheduler cuối ngày, broker, refund hoặc tự sửa dữ liệu.
+- Maven profile full-suite chọn cả *Test và *IT; mvnw -Pfull-suite -Dqr.parser.url=...
+  verify chạy test, Type04 gốc, restart B5/B6 và đóng gói. Thiếu parser thật thì test
+  Type04 thất bại, không skip hoặc thay bằng parser tự viết.
+
+Các kết quả cụ thể và bảng 12 kịch bản nằm trong [báo cáo B8](phase8-report.md).

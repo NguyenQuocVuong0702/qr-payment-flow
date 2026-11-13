@@ -10,6 +10,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -21,14 +22,30 @@ public class HmacSigner {
         var fields = new TreeMap<String, String>();
         body.fields().forEachRemaining(entry -> {
             if (!entry.getKey().equals("signature") && !entry.getValue().isNull()) {
-                if (entry.getValue().isContainerNode()) {
-                    throw new IllegalArgumentException("Only scalar signature fields are supported in B2");
-                }
-                fields.put(entry.getKey(), entry.getValue().asText());
+                fields.put(entry.getKey(), entry.getValue().isContainerNode()
+                        ? canonicalJson(entry.getValue()).toString() : entry.getValue().asText());
             }
         });
         return fields.entrySet().stream().map(entry -> entry.getKey() + "=" + entry.getValue())
                 .collect(Collectors.joining("&"));
+    }
+
+    // B8 containers use compact JSON with recursively sorted object keys and unchanged array order.
+    // Scalar canonicalization above remains byte-for-byte compatible with B1-B7.
+    private JsonNode canonicalJson(JsonNode value) {
+        if (value.isObject()) {
+            var sorted = new TreeMap<String, JsonNode>();
+            value.fields().forEachRemaining(entry -> sorted.put(entry.getKey(), canonicalJson(entry.getValue())));
+            var object = JsonNodeFactory.instance.objectNode();
+            sorted.forEach(object::set);
+            return object;
+        }
+        if (value.isArray()) {
+            var array = JsonNodeFactory.instance.arrayNode();
+            value.forEach(element -> array.add(canonicalJson(element)));
+            return array;
+        }
+        return value;
     }
 
     public String sign(JsonNode body, String secret) {

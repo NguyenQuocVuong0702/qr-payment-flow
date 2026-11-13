@@ -1,0 +1,44 @@
+@baseUrl = http://localhost:8080
+@date = 2026-11-02
+# Chữ ký đúng cho date=2026-11-02&merchantId=MC001, secret mẫu secret-mc001.
+# Nếu đổi ngày, phải ký lại header. Merchant POST tự ký nên không cần tính tay.
+@signature = 3e01f48ad5777cf5f12725406029a2ae37936d4e070afb30e12e3d692fe5911f
+
+### Gateway: chỉ SUCCESS có paidAt trong ngày Việt Nam; response có X-Signature
+GET {{baseUrl}}/api/gateway/reconciliation?merchantId=MC001&date={{date}}
+X-Merchant-Id: MC001
+X-Signature: {{signature}}
+
+### Merchant: chỉ báo cáo, không sửa đơn hoặc chuyển tiền
+POST {{baseUrl}}/api/merchant/reconcile
+Content-Type: application/json
+
+{"date":"{{date}}"}
+
+### Gọi lại cùng ngày: không tạo tác dụng phụ
+POST {{baseUrl}}/api/merchant/reconcile
+Content-Type: application/json
+
+{"date":"{{date}}"}
+
+### Sai chữ ký: 401 INVALID_SIGNATURE
+GET {{baseUrl}}/api/gateway/reconciliation?merchantId=MC001&date={{date}}
+X-Merchant-Id: MC001
+X-Signature: 0000000000000000000000000000000000000000000000000000000000000000
+
+### Header/query Merchant khác nhau: 401, không lộ dữ liệu Merchant khác
+GET {{baseUrl}}/api/gateway/reconciliation?merchantId=MC002&date={{date}}
+X-Merchant-Id: MC001
+X-Signature: {{signature}}
+
+### Ngày sai: 400 INVALID_DATE, không gọi Gateway
+POST {{baseUrl}}/api/merchant/reconcile
+Content-Type: application/json
+
+{"date":"2026-02-30"}
+
+# missingInMerchant: lấy orderId trong báo cáo; xác minh/sửa bằng thao tác B7 RIÊNG:
+# POST /api/merchant/orders/<orderId>/sync
+# Đối soát không tự sync và không gia hạn QR, chuyển tiền hoặc hoàn tiền.
+# Các tình huống missingInGateway/amountMismatch có fixture kiểm thử riêng;
+# không sửa dữ liệu tài chính đang sử dụng để tạo demo giả.

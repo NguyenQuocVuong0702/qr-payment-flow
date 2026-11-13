@@ -3,6 +3,7 @@ package vn.vnpay.qr.gateway.service;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -28,13 +29,8 @@ public class PaymentLookupAccess {
     public LookupCaller authenticate(HttpHeaders headers, String txnRef) {
         // Presence of either Merchant header always selects the HMAC branch. Never fall back to Wallet.
         if (headers.containsKey("X-Merchant-Id") || headers.containsKey("X-Signature")) {
-            if (headers.containsKey(HttpHeaders.AUTHORIZATION) || !single(headers, "X-Merchant-Id")
-                    || !single(headers, "X-Signature")) throw invalidSignature();
-            String id = headers.getFirst("X-Merchant-Id");
-            var merchant = merchants.findById(id).orElseThrow(PaymentLookupAccess::invalidSignature);
-            var fields = mapper.createObjectNode().put("merchantId", id).put("txnRef", txnRef);
-            if (!hmac.verify(fields, merchant.getSecretKey(), headers.getFirst("X-Signature"))) throw invalidSignature();
-            return new LookupCaller(false, id, merchant.getSecretKey());
+            return authenticateMerchant(headers, mapper.createObjectNode()
+                    .put("merchantId", headers.getFirst("X-Merchant-Id")).put("txnRef", txnRef));
         }
         String expected = "Bearer " + wallet.readToken();
         if (!single(headers, HttpHeaders.AUTHORIZATION) || !MessageDigest.isEqual(
@@ -43,6 +39,16 @@ public class PaymentLookupAccess {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "INVALID_WALLET_CREDENTIALS", "Wallet read credentials are required");
         }
         return new LookupCaller(true, null, wallet.readToken());
+    }
+
+    public LookupCaller authenticateMerchant(HttpHeaders headers, JsonNode fields) {
+        if (headers.containsKey(HttpHeaders.AUTHORIZATION) || !single(headers, "X-Merchant-Id")
+                || !single(headers, "X-Signature")) throw invalidSignature();
+        String id = headers.getFirst("X-Merchant-Id");
+        if (!id.equals(fields.path("merchantId").asText())) throw invalidSignature();
+        var merchant = merchants.findById(id).orElseThrow(PaymentLookupAccess::invalidSignature);
+        if (!hmac.verify(fields, merchant.getSecretKey(), headers.getFirst("X-Signature"))) throw invalidSignature();
+        return new LookupCaller(false, id, merchant.getSecretKey());
     }
 
     private boolean single(HttpHeaders headers, String name) {

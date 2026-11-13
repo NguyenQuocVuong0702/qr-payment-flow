@@ -16,6 +16,7 @@ import vn.vnpay.qr.common.error.ApiException;
 import vn.vnpay.qr.merchant.config.MerchantGatewayProperties;
 import vn.vnpay.qr.merchant.service.OrderPaymentSnapshot;
 import vn.vnpay.qr.merchant.api.OrderDetails;
+import vn.vnpay.qr.common.time.BusinessDay;
 
 @Component
 public class GatewayPaymentClient {
@@ -121,6 +122,29 @@ public class GatewayPaymentClient {
             return result;
         } catch (RestClientException ex) { throw unavailable(); }
     }
+    public GatewayReconciliation reconciliation(String merchantId, BusinessDay day) {
+        var fields = mapper.createObjectNode().put("merchantId", merchantId).put("date", day.date().toString());
+        try {
+            return lookupClient.get().uri(builder -> builder.path("/api/gateway/reconciliation")
+                            .queryParam("merchantId", merchantId).queryParam("date", day.date()).build())
+                    .header("X-Merchant-Id", merchantId).header("X-Signature", hmac.sign(fields, properties.secretKey()))
+                    .exchange((request, reply) -> {
+                        if (reply.getStatusCode().is5xxServerError()) throw unavailable();
+                        try {
+                            byte[] bytes = reply.getBody().readNBytes(4 * 1024 * 1024 + 1);
+                            if (bytes.length > 4 * 1024 * 1024) throw invalidResponse();
+                            var json = mapper.readTree(bytes);
+                            var signatures = reply.getHeaders().get("X-Signature");
+                            if (signatures == null || signatures.size() != 1) throw invalidResponse();
+                            verify(json, signatures.getFirst());
+                            if (reply.getStatusCode().value() != 200) throw invalidResponse();
+                            return GatewayReconciliation.read(json, mapper, merchantId, day);
+                        } catch (java.net.SocketTimeoutException ex) { throw unavailable(); }
+                        catch (IOException | IllegalArgumentException | ArithmeticException ex) { throw invalidResponse(); }
+                    });
+        } catch (RestClientException ex) { throw unavailable(); }
+    }
+
     private void verify(JsonNode json, String signature) {
         try {
             if (json == null || !json.isObject() || !hmac.verify(json, properties.secretKey(), signature)) throw invalidResponse();

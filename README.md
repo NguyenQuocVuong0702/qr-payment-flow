@@ -1,8 +1,8 @@
-# QR Payment Flow — B1–B7
+# QR Payment Flow — B1–B8
 
 Ứng dụng bài tập Java 21, Spring Boot 3.5.16, Maven 3.9.16, H2.
-Đã triển khai **B1–B7**: tạo đơn, QR động, scan, PIN, chuyển tiền giả lập, IPN bền
-vững, Merchant tra cứu/đồng bộ trạng thái và job hết hạn. **Chưa triển khai B8 hoặc hoàn tiền**.
+Đã triển khai **B1–B8**: tạo đơn, QR động, scan, PIN, chuyển tiền giả lập, IPN bền
+vững, tra cứu/đồng bộ, hết hạn và đối soát cuối ngày. Dừng tại B8, không có hoàn tiền.
 
 - [Đề bài chính thức](bai-tap-luong-thanh-toan-qr.md)
 - [Phân tích B1–B8, mô hình dữ liệu, transaction và các quyết định](docs/architecture.md)
@@ -19,6 +19,8 @@ vững, Merchant tra cứu/đồng bộ trạng thái và job hết hạn. **Ch�
 - [Request B6](requests/b6.http)
 - [Báo cáo B7: tra cứu, hết hạn và audit](docs/phase7-report.md)
 - [Request B7](requests/b7.http)
+- [Báo cáo B8 và trạng thái 12 kịch bản bắt buộc](docs/phase8-report.md)
+- [Request B8](requests/b8.http), [demo HTTP toàn luồng B1–B8](requests/full-flow.http)
 
 ## Cấu trúc
 
@@ -29,6 +31,7 @@ pom.xml
 src/main/java/vn/vnpay/qr/
   QrPaymentApplication.java
   common/config/                      Clock, RestClient builder, JSON strict
+  common/time/                        Khoảng ngày Việt Nam [start, end)
   common/crypto/                      Canonicalization và HMAC-SHA256
   common/qr/                          CRC dùng chung
   common/error/                       Error envelope và advice
@@ -38,14 +41,14 @@ src/main/java/vn/vnpay/qr/
     config/                           MC001, URL và secret Gateway cục bộ
     domain/                           Order, OrderStatus
     repository/                       JPA repository, sequence cấp orderId
-    service/                          B1, điều phối B2/B7; transaction đọc/lưu riêng, IPN
+    service/                          B1/B2/B7/IPN; B8 so sánh snapshot chỉ đọc bằng Map
   gateway/
     api/                              POST payments, confirm; GET có phân quyền
     bank/                             Account, ledger, Bank nội bộ cùng transaction
     ipn/                              Outbox, attempt log, claim/lease, RestClient, worker
     domain/                           Merchant registry, PaymentTxn, PaymentStatus
     repository/                       Các repository chỉ Gateway sử dụng
-    service/                          Tạo/replay/confirm/lookup và job hết hạn có khóa DB
+    service/                          Tạo/replay/confirm/lookup, expiry, danh sách SUCCESS B8
     qr/                               TLV động, CRC-16/CCITT-FALSE
   wallet/
     api/                              POST scan và DTO
@@ -75,6 +78,8 @@ src/test/java/vn/vnpay/qr/
   gateway/PaymentExpiryIntegrationTest.java Clock, race với confirm, rollback và replay
   gateway/PaymentExpirySchedulerTest.java Scheduler thật, interval cấu hình
   merchant/MerchantStatusHttpIntegrationTest.java HTTP lookup/sync, race IPN và audit
+  merchant/ReconciliationHttpIntegrationTest.java B1–B8 thật, sai lệch và dữ liệu giả mạo
+  gateway/ReconciliationHmacTest.java   Vector HMAC JSON lồng nhau và ngày Việt Nam
   wallet/PaymentQrParserTest.java
   wallet/WalletScanHttpIntegrationTest.java
   wallet/WalletPaymentHttpTest.java    PIN, counter, lock, HTTP timeout
@@ -556,6 +561,83 @@ thể hoàn tất SUCCESS sau hạn; job chờ khóa rồi giữ nguyên SUCCESS
 tại/sau hạn bị từ chối. Không chuyển tiền, thêm ledger, idempotency hoặc IPN cho EXPIRED.
 Index `(status, expire_at)` hỗ trợ tìm ứng viên; mỗi giao dịch dùng transaction ngắn riêng.
 
+## API B8 — đối soát cuối ngày
+
+Gateway: `GET /api/gateway/reconciliation?merchantId=MC001&date=2026-11-02`.
+Header bắt buộc `X-Merchant-Id: MC001`, `X-Signature` ký hai trường date + merchantId.
+Header Merchant phải khớp query, không cho dùng credential Wallet hoặc trộn credential.
+Response có X-Signature và no-store, chỉ chứa năm trường theo đề:
+
+```json
+{
+  "merchantId":"MC001","date":"2026-11-02","successCount":1,"successAmount":55000,
+  "transactions":[{"txnRef":"TX00000001","orderId":"ORD20261102001","amount":55000,
+    "status":"SUCCESS","bankRef":"BK20261102000001","paidAt":"2026-11-02T09:03:12+07:00"}]
+}
+```
+
+Merchant: `POST /api/merchant/reconcile`, body `{"date":"2026-11-02"}`. Merchant tự
+gọi Gateway qua HTTP và xác thực HMAC/schema trước khi đối chiếu snapshot local.
+HTTP 200 với đúng bảy trường, ví dụ một giao dịch mất IPN:
+
+```json
+{
+  "date":"2026-11-02","matched":0,
+  "missingInMerchant":[{"txnRef":"TX00000001","orderId":"ORD20261102001","amount":55000}],
+  "missingInGateway":[],"amountMismatch":[],"gatewayTotal":55000,"merchantTotal":0
+}
+```
+
+Ngày tính theo **paidAt tại Asia/Ho_Chi_Minh**, từ đầu ngày đến trước đầu ngày sau.
+Gateway lọc SUCCESS, Merchant lọc PAID trong cùng khoảng; không lấy createdAt hoặc
+ngày UTC. So sánh bằng Map theo txnRef, kiểm cả orderId; không so hai danh sách lồng nhau.
+Matched yêu cầu hai bên cùng thành công và amount bằng nhau. Có cả hai nhưng lệch
+amount chỉ vào `amountMismatch`, dạng `{txnRef,orderId,gatewayAmount,merchantAmount}`.
+Totals cộng toàn bộ amount của từng tập riêng bằng long, không chỉ các dòng matched.
+
+HMAC giữ nguyên quy tắc scalar B2. Với array/object B8, value là JSON compact, sort
+key object đệ quy, giữ thứ tự array; Gateway sort transactions theo txnRef. Không
+URL-encode hoặc chuẩn hóa paidAt trước verify. Client kiểm merchant/date, toàn bộ
+schema, định danh, SUCCESS, paidAt đúng ngày, uniqueness txnRef/orderId/bankRef và
+đối chiếu count/total; payload đúng chữ ký vẫn phải vượt các kiểm tra này.
+
+Đối soát **không ghi đơn hoặc tài chính**, không tự sync. Với missingInMerchant,
+có thể gọi POST sync B7 riêng rồi chạy lại báo cáo. Hai snapshot lấy qua HTTP/DB
+khác thời điểm; nếu đang có thanh toán/IPN, chạy lại sau khi các giao dịch ổn định.
+
+| Lỗi B8 | HTTP / mã |
+|---|---|
+| Ngày không đúng yyyy-MM-dd/ngày lịch không tồn tại | 400 INVALID_DATE |
+| JSON sai kiểu, trường lạ, query thiếu/trùng/thừa | 400 INVALID_REQUEST |
+| Gateway thiếu/sai HMAC, header/query khác Merchant, credential không hợp lệ | 401 INVALID_SIGNATURE |
+| Gateway mất phản hồi/timeout headers hoặc body/5xx | 502 GATEWAY_UNAVAILABLE tại Merchant |
+| Response sai HMAC/schema/binding/count/total hoặc trùng giao dịch | 502 INVALID_GATEWAY_RESPONSE |
+| Đơn PAID thiếu txnRef/paidAt hợp lệ, không thể đối soát an toàn | 409 INVALID_MERCHANT_DATA |
+
+Không có báo cáo thành công giả khi Gateway lỗi. HTTP client dùng timeout 3s/5s,
+không redirect, giới hạn response B8 4 MiB và từ chối thay vì trả danh sách bị cắt.
+Chưa phân trang; các index mới hỗ trợ merchant/status/paid_at. Chi tiết giả định,
+schema và ví dụ các loại lệch trong [báo cáo B8](docs/phase8-report.md).
+
+## Demo B1–B8
+
+Mở [requests/full-flow.http](requests/full-flow.http) bằng VS Code REST Client,
+chạy tuần tự từng request có tên. File tự nối orderId, txnRef, QR từ response trước.
+Đặt date theo ngày thanh toán Việt Nam; đổi requestId cho một lần mua mới và giữ
+nguyên nếu retry. B6 chạy nền, chờ khoảng một giây rồi GET đơn; B7 sync là thao tác
+riêng khi mất IPN. Báo cáo tính tất cả giao dịch cùng ngày, nên matched có thể lớn
+hơn 1 nếu DB đã có các lần demo trước. Các request từng bước vẫn nằm trong requests/.
+
+```mermaid
+flowchart LR
+    O[B1 tạo đơn] --> Q[B2 QR động]
+    Q --> S[B3 Wallet scan + Gateway lookup]
+    S --> P[B4 PIN + B5 chuyển tiền]
+    P --> I[B6 outbox và IPN]
+    I --> L[B7 xem/sync đơn]
+    L --> R[B8 xác thực danh sách và đối soát chỉ đọc]
+```
+
 ## Kiểm thử
 
 ```powershell
@@ -579,19 +661,24 @@ Kiểm tra Type04 bằng project gốc trong terminal khác, từ thư mục qr-
 java -jar target/qr-parser-0.0.1-SNAPSHOT.jar --server.port=8081
 ```
 
-Tại qr-payment-flow, chạy **toàn bộ B1–B7, Type04 và restart thật**:
+Tại qr-payment-flow, chạy **toàn bộ B1–B8, Type04 và restart thật** bằng profile chuẩn:
 
 ```powershell
-.\mvnw.cmd "-Dtest=*Test,*IT" "-Dqr.parser.url=http://localhost:8081" test package
+.\mvnw.cmd -Pfull-suite "-Dqr.parser.url=http://localhost:8081" verify
 ```
 
-Kết quả thực tế ngày 2026-11-13: **291 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
-244 test B1–B6 và 47 test B7 mới (36 Merchant HTTP/audit, 10 expiry và một scheduler).
-`mvnw test` mặc định chọn 288 test nội bộ; full command trên bao gồm ba lớp IT.
+Linux/macOS dùng `sh mvnw -Pfull-suite -Dqr.parser.url=http://localhost:8081 verify`.
+Dependency ngoài ứng dụng: JDK 21, Maven Central lần tải đầu, project qr-parser gốc
+đang chạy tại URL được chỉ định. Restart tests tự tạo process/port/H2 file trong target/.
+Không có parser thật thì full-suite thất bại; không dùng mock hoặc âm thầm skip.
+
+Kết quả thực tế ngày 2026-11-13: **377 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
+291 test B1–B7 và 86 test B8 mới (82 HTTP tích hợp, bốn HMAC/ngày Việt Nam).
+`mvnw test` mặc định chọn 374 test nội bộ; profile full-suite thêm ba lớp IT.
 `qr-parser`
 gốc trả HTTP 200, `status=VALID`, CRC VALID cho
-QR thực sự sinh bởi Gateway với `type="04"`. JAR đóng gói thành công. Đây chưa phải
-toàn bộ 12 kịch bản end-to-end B1–B8. Xem [báo cáo B7](docs/phase7-report.md).
+QR thực sự sinh bởi Gateway với `type="04"`. JAR đóng gói thành công. Đủ 12 kịch bản
+bắt buộc đã chạy, bảng ánh xạ test và kết quả ở [báo cáo B8](docs/phase8-report.md).
 
 Môi trường triển khai hiện tại giới hạn ghi ngoài workspace, nên lệnh kiểm chứng dùng
 cache cục bộ (không thay đổi cấu hình Maven của người dùng):
@@ -608,7 +695,7 @@ trong wrapper properties, rồi nạp vào cache cục bộ. Các lần test sau
 
 ## Phạm vi còn lại
 
-Dừng tại B7. Chưa có đối soát B8 hoặc hoàn tiền. PaymentCompleted chỉ phục vụ quan sát
-nội bộ; tính bền vững IPN dựa trên outbox trong transaction B5. Giới hạn lease trong
-[báo cáo B6](docs/phase6-report.md) vẫn áp dụng; thay đổi audit và kiểm chứng B7 được
-ghi trong [báo cáo B7](docs/phase7-report.md).
+Dừng sau B8, không có refund hoặc phần mở rộng khác. PaymentCompleted chỉ phục vụ
+quan sát nội bộ; tính bền vững IPN dựa trên outbox trong transaction B5. Giới hạn
+lease B6, đọc hai snapshot khác thời điểm, dung lượng response và phạm vi H2 được
+ghi rõ trong [báo cáo B8](docs/phase8-report.md).
