@@ -23,10 +23,12 @@ public class ConfirmationTransaction {
     private final ObjectMapper mapper;
     private final Clock clock;
     private final ApplicationEventPublisher events;
+    private final vn.vnpay.qr.gateway.ipn.IpnEnqueuer ipn;
     public ConfirmationTransaction(PaymentTxnRepository payments, IdempotencyRepository requests, MerchantRepository merchants,
-            BankTransferService bank, ObjectMapper mapper, Clock clock, ApplicationEventPublisher events) {
+            BankTransferService bank, ObjectMapper mapper, Clock clock, ApplicationEventPublisher events,
+            vn.vnpay.qr.gateway.ipn.IpnEnqueuer ipn) {
         this.payments = payments; this.requests = requests; this.merchants = merchants; this.bank = bank;
-        this.mapper = mapper; this.clock = clock; this.events = events;
+        this.mapper = mapper; this.clock = clock; this.events = events; this.ipn = ipn;
     }
     @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public ConfirmationOutcome execute(String txnRef, ConfirmPaymentRequest request) {
@@ -54,12 +56,14 @@ public class ConfirmationTransaction {
         var transfer = bank.transfer(txnRef, request.payerAccount(), merchant.getAccountNo(), txn.getAmount(), now);
         if (transfer.errorCode() != null) {
             txn.fail(transfer.errorCode());
+            ipn.enqueue(txn, merchant);
             events.publishEvent(new PaymentCompleted(txnRef, "FAILED", null));
             if (transfer.errorCode().equals("ACCOUNT_NOT_FOUND")) return error(record, 404, "ACCOUNT_NOT_FOUND", "Bank account not found", now);
             return finish(record, 200, new ConfirmPaymentResult(txnRef, "FAILED", txn.getAmount(), null, null,
                     "Thanh toán thất bại", transfer.errorCode()));
         }
         txn.succeed(transfer.bankRef(), now);
+        ipn.enqueue(txn, merchant);
         events.publishEvent(new PaymentCompleted(txnRef, "SUCCESS", transfer.bankRef()));
         return finish(record, 200, new ConfirmPaymentResult(txnRef, "SUCCESS", txn.getAmount(), transfer.bankRef(),
                 OffsetDateTime.ofInstant(now, BUSINESS_ZONE), "Thanh toán thành công", null));

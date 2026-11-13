@@ -76,6 +76,7 @@ class RestartPersistenceIT {
         // Keep the verification independent of a developer's external Gateway URL or DB password.
         builder.environment().remove("QR_GATEWAY_BASE_URL");builder.environment().remove("QR_DB_PASSWORD");
         builder.command().add("--spring.datasource.password=");
+        builder.command().add("--app.gateway.ipn.enabled=false"); // Isolate the reviewed B5 restart assertions from B6 delivery.
         Process process=builder.start(); processes.add(process);
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(45);
         while(System.nanoTime()<deadline) {

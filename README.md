@@ -1,8 +1,8 @@
-# QR Payment Flow — B1–B5
+# QR Payment Flow — B1–B6
 
 Ứng dụng bài tập Java 21, Spring Boot 3.5.16, Maven 3.9.16, H2.
-Đã triển khai **B1–B5**: tạo đơn, QR động, scan, xác minh PIN và chuyển tiền giả lập
-trong một transaction Gateway/Bank. **Chưa triển khai B6–B8**.
+Đã triển khai **B1–B6**: tạo đơn, QR động, scan, xác minh PIN, chuyển tiền giả lập
+trong một transaction Gateway/Bank và IPN bền vững tới Merchant. **Chưa triển khai B7–B8**.
 
 - [Đề bài chính thức](bai-tap-luong-thanh-toan-qr.md)
 - [Phân tích B1–B8, mô hình dữ liệu, transaction và các quyết định](docs/architecture.md)
@@ -15,6 +15,8 @@ trong một transaction Gateway/Bank. **Chưa triển khai B6–B8**.
 - [Thiết kế B4–B5](docs/b4-b5-design.md), [báo cáo mốc B4](docs/phase4-report.md)
 - [Báo cáo B5: transaction, concurrency, test và restart](docs/phase5-report.md)
 - [Request B4–B5](requests/b4-b5.http)
+- [Báo cáo B6: outbox, retry và phục hồi crash](docs/phase6-report.md)
+- [Request B6](requests/b6.http)
 
 ## Cấu trúc
 
@@ -38,6 +40,7 @@ src/main/java/vn/vnpay/qr/
   gateway/
     api/                              POST payments, confirm; GET có phân quyền
     bank/                             Account, ledger, Bank nội bộ cùng transaction
+    ipn/                              Outbox, attempt log, claim/lease, RestClient, worker
     domain/                           Merchant registry, PaymentTxn, PaymentStatus
     repository/                       Các repository chỉ Gateway sử dụng
     service/                          Tạo/replay và phục hồi unique-key race
@@ -53,7 +56,8 @@ src/main/resources/
   application.yml
   application-dev.yml                 H2 file, H2 console local
   schema.sql                          orders, merchant, payment_txn, wallet_user,
-                                      account, ledger_entry, idempotency, sequence
+                                      account, ledger_entry, idempotency, ipn_outbox,
+                                      ipn_log, sequence
   data.sql                            Seed MC001 nếu chưa tồn tại
 src/test/java/vn/vnpay/qr/
   ApplicationContextTest.java
@@ -64,6 +68,8 @@ src/test/java/vn/vnpay/qr/
   gateway/QrParserCompatibilityIT.java Kiểm tra ngoài qua API qr-parser gốc
   gateway/ConfirmationIntegrationTest.java Money, concurrency, fault injection
   gateway/RestartPersistenceIT.java    Hai process thật, HTTP và H2 file qua restart
+  gateway/IpnIntegrationTest.java      HMAC, HTTP, retry, concurrency và fault injection
+  gateway/IpnRestartIT.java            Ba process thật: READY, mất ACK, thu hồi lease
   wallet/PaymentQrParserTest.java
   wallet/WalletScanHttpIntegrationTest.java
   wallet/WalletPaymentHttpTest.java    PIN, counter, lock, HTTP timeout
@@ -76,7 +82,7 @@ requests/b3.http
 
 Merchant → Gateway hiện gọi qua HTTP thật, không import service/repository/entity
 của nhau. Bank nằm trong Gateway và dùng chung transaction cơ sở dữ liệu ở B5;
-đã có Bank nội bộ, account, ledger và wallet_user; chưa có IPN.
+đã có Bank nội bộ, account, ledger, wallet_user và IPN qua HTTP tới Merchant.
 
 ## Chạy
 
@@ -401,7 +407,76 @@ cách tái sử dụng UUID. Khóa/bộ đếm commit trước khi trả lỗi v
 Gateway khóa payment_txn và hai account theo thứ tự account_no cố định. Bank dùng
 propagation MANDATORY, cùng transaction JPA; debit, credit, hai ledger và cache kết
 quả hoặc commit tất cả, hoặc rollback tất cả. Lỗi hệ thống không được đổi thành
-thành công/thiếu tiền. Tại B5, Merchant vẫn WAITING_PAYMENT; chưa có IPN.
+thành công/thiếu tiền. B5 commit thêm outbox; worker B6 cập nhật Merchant sau commit.
+
+## API B6 — IPN tới Merchant
+
+Sau khi B5 commit SUCCESS hoặc FAILED, Gateway tự gửi
+`POST {merchant.ipn_url}` bằng RestClient. URL mẫu MC001 là
+`http://localhost:8080/api/merchant/ipn`. Nếu đổi cổng, cập nhật registry trước khi
+thanh toán; URL và payload đã tạo trong outbox được giữ cố định khi retry.
+
+```mermaid
+flowchart LR
+    B[B5: kết quả + tiền + idempotency] -->|cùng commit| O[(ipn_outbox READY)]
+    O -->|transaction claim ngắn| W[IPN Worker]
+    W -->|HTTP POST + HMAC, ngoài transaction| M[Merchant: khóa đơn và commit]
+    M -->|ACK 00 hoặc 02| W
+    W -->|transaction ngắn| L[(ipn_log + DELIVERED hoặc lịch retry)]
+```
+
+Ví dụ body SUCCESS (signature phải được tính từ toàn bộ trường còn lại):
+
+```json
+{
+  "txnRef":"TX00000001","orderId":"ORD20261102001","amount":55000,
+  "status":"SUCCESS","bankRef":"BK20261102000001",
+  "paidAt":"2026-11-02T09:03:12+07:00","signature":"<hex HMAC-SHA256>"
+}
+```
+
+FAILED chỉ có txnRef/orderId/amount/status/signature; bỏ bankRef/paidAt.
+HMAC dùng secret Merchant, UTF-8, bỏ signature và giá trị null, sort key tăng dần,
+nối `key=value` bằng `&`, giữ nguyên format paidAt và không URL-encode, như B2.
+Merchant dùng secret cấu hình cục bộ; không nhận secret hoặc merchantId tùy ý từ IPN.
+
+| HTTP 200 / code | Ý nghĩa |
+|---|---|
+| `97` / Invalid signature | Sai hoặc thiếu HMAC, ưu tiên trước kiểm đơn |
+| `01` / Order not found | Đơn không thuộc Merchant hoặc txnRef không khớp đơn |
+| `04` / Invalid amount | Amount không khớp đơn |
+| `02` / Order already confirmed | Đơn đã ra khỏi WAITING_PAYMENT; không thay đổi |
+| `00` / Confirm success | SUCCESS → PAID; FAILED → PAYMENT_FAILED |
+
+Response đúng hai trường, ví dụ `{"code":"00","message":"Confirm success"}`.
+Merchant khóa đơn trong transaction; replay trả 02 và IPN mâu thuẫn không đảo PAID.
+JSON hỏng hoặc payload có chữ ký đúng nhưng status/paidAt/bankRef sai cấu trúc trả
+400 INVALID_REQUEST theo error envelope kỹ thuật hiện có.
+
+Worker poll mặc định 1s, gửi tối đa **3 lần tổng cộng**: lần đầu ngay khi claim,
+lần hai sau 10s kể từ kết thúc lần trước, lần ba sau thêm 30s. Không gửi lần thứ tư.
+HTTP timeout/connect error, non-2xx, JSON lỗi hoặc code khác 00/02 đều retry;
+00/02 trên HTTP 2xx kết thúc. RestClient connect 3s/read 5s, không follow redirect.
+Mỗi attempt được reserve cùng log trước HTTP; lease mặc định 60s, token ngăn ACK cũ
+ghi đè công việc đã thu hồi. Hết budget giữ EXHAUSTED, không hoàn tiền/chuyển lại tiền.
+
+Cấu hình tùy chọn (giá trị mặc định nằm trong `IpnProperties`):
+
+```yaml
+app:
+  gateway:
+    ipn:
+      enabled: true
+      poll-millis: 1000
+      lease: PT1M
+      second-delay: PT10S
+      third-delay: PT30S
+```
+
+Lease tối thiểu 15s. Test mặc định tắt scheduler để các ca B1–B5 giữ fixture cũ;
+test B6 gọi worker thật với Clock điều khiển được, và IT bật scheduler qua restart.
+Không thêm broker hoặc API kích hoạt worker. Chạy B1 → B2 → Wallet payments như ví dụ
+trên là đủ để phát sinh IPN; xem outbox/log/orders qua H2 console dev.
 
 ## Kiểm thử
 
@@ -426,18 +501,19 @@ Kiểm tra Type04 bằng project gốc trong terminal khác, từ thư mục qr-
 java -jar target/qr-parser-0.0.1-SNAPSHOT.jar --server.port=8081
 ```
 
-Tại qr-payment-flow, chạy **toàn bộ B1–B5, Type04 và restart thật**:
+Tại qr-payment-flow, chạy **toàn bộ B1–B6, Type04 và restart thật**:
 
 ```powershell
 .\mvnw.cmd "-Dtest=*Test,*IT" "-Dqr.parser.url=http://localhost:8081" test package
 ```
 
-Kết quả thực tế ngày 2026-11-12: **219 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
-185 test B1–B3, 12 test B4 và 22 test B5. `mvnw test` mặc định chạy 217 test nội bộ;
-full command trên bao gồm hai lớp IT. `qr-parser`
+Kết quả thực tế ngày 2026-11-13: **244 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
+219 test B1–B5 và 25 test B6 (24 integration test, một IT restart ba process).
+`mvnw test` mặc định chọn 241 test nội bộ; full command trên bao gồm ba lớp IT.
+`qr-parser`
 gốc trả HTTP 200, `status=VALID`, CRC VALID cho
 QR thực sự sinh bởi Gateway với `type="04"`. JAR đóng gói thành công. Đây chưa phải
-toàn bộ 12 kịch bản end-to-end B1–B8. Xem [báo cáo B5](docs/phase5-report.md).
+toàn bộ 12 kịch bản end-to-end B1–B8. Xem [báo cáo B6](docs/phase6-report.md).
 
 Môi trường triển khai hiện tại giới hạn ghi ngoài workspace, nên lệnh kiểm chứng dùng
 cache cục bộ (không thay đổi cấu hình Maven của người dùng):
@@ -454,6 +530,7 @@ trong wrapper properties, rồi nạp vào cache cục bộ. Các lần test sau
 
 ## Phạm vi còn lại
 
-Dừng tại B5. Chưa có B6–B8: IPN/retry IPN, workflow Merchant tra cứu, job hết hạn,
-đối soát hoặc hoàn tiền. PaymentCompleted là event nội bộ; B6 tương lai cần listener
-AFTER_COMMIT và cơ chế giao nhận bền vững, hiện không có listener gửi HTTP.
+Dừng tại B6. Chưa có workflow Merchant tra cứu B7, job hết hạn, đối soát B8 hoặc
+hoàn tiền. PaymentCompleted chỉ phục vụ quan sát nội bộ; tính bền vững IPN dựa trên
+outbox trong transaction B5. Các giới hạn giao nhận, lease và nâng cấp dữ liệu cũ
+được ghi rõ trong [báo cáo B6](docs/phase6-report.md).

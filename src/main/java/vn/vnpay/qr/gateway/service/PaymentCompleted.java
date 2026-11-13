@@ -1,3 +1,3 @@
 package vn.vnpay.qr.gateway.service;
-/** Future B6 consumers must use @TransactionalEventListener(AFTER_COMMIT); no IPN listener exists now. */
+/** In-process observation only. Durable B6 delivery is enqueued in the payment transaction, not by this event. */
 public record PaymentCompleted(String txnRef, String status, String bankRef) { }

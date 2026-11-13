@@ -1,11 +1,12 @@
-# Phân tích và thiết kế — B1–B5
+# Phân tích và thiết kế — B1–B6
 
 Tài liệu gốc: [bai-tap-luong-thanh-toan-qr.md](../bai-tap-luong-thanh-toan-qr.md).
 Khi có khác biệt, quy tắc nghiệp vụ, API, mã lỗi và kiểm thử trong đề được ưu tiên.
-Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1–B5. Phần B6–B8 bên dưới
-vẫn là thiết kế cho các giai đoạn sau, chưa có API hay nghiệp vụ tương ứng.
+Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1–B6. Phần B7–B8 bên dưới
+vẫn là thiết kế cho các giai đoạn sau, chưa có workflow tương ứng.
 Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md) và
-[báo cáo B3](phase3-report.md), [B4](phase4-report.md) và [B5](phase5-report.md).
+[báo cáo B3](phase3-report.md), [B4](phase4-report.md), [B5](phase5-report.md)
+và [B6](phase6-report.md).
 
 ## 1. Quan hệ B1–B8
 
@@ -28,7 +29,7 @@ flowchart LR
     G -->|Gọi nội bộ cùng transaction B5| B[gateway.bank]
     M --> O[(orders)]
     W --> U[(wallet_user)]
-    G --> T[(merchant / payment_txn / idempotency / ipn_log)]
+    G --> T[(merchant / payment_txn / idempotency / ipn_outbox / ipn_log)]
     B --> L[(account / ledger_entry)]
 ```
 
@@ -50,8 +51,8 @@ Chưa thêm broker, cache, service discovery, OAuth, frontend hoặc thư viện
 
 Đã tạo `orders`, `merchant`, `payment_txn`, sequence `merchant_order_seq` và
 `gateway_txn_seq`. `data.sql` nạp MC001 nếu thiếu, không ghi đè registry đã có.
-Đã bổ sung wallet_user, account, ledger_entry, idempotency và bank_ref_seq. IPN
-chưa có DDL/entity/job. Seed User/Bank chỉ insert khi thiếu, không reset khi restart.
+Đã bổ sung wallet_user, account, ledger_entry, idempotency, bank_ref_seq và hai bảng
+IPN. Seed User/Bank chỉ insert khi thiếu, không reset khi restart.
 
 | Bảng / chủ sở hữu | Khóa, cột chính và quan hệ dự kiến |
 |---|---|
@@ -61,7 +62,8 @@ chưa có DDL/entity/job. Seed User/Bank chỉ insert khi thiếu, không reset 
 | `account` / Bank — đã có | PK account_no; owner_name; balance BIGINT CHECK balance >= 0; version |
 | `ledger_entry` / Bank — đã có | PK id; txn_ref FK → payment_txn; bank_ref; account_no FK → account; DEBIT/CREDIT; amount > 0; created_at; UNIQUE(bank_ref,direction), UNIQUE(txn_ref,direction) |
 | `wallet_user` / Wallet — đã có | PK user_id; full_name; account_no tham chiếu logic; pin_hash BCrypt; failed_pin_attempts, pin_locked_until, version |
-| `ipn_log` / Gateway | PK id; txn_ref FK → payment_txn; attempt, request_body, response_code, sent_at; UNIQUE(txn_ref, attempt) |
+| `ipn_outbox` / Gateway — đã có | PK txn_ref FK → payment_txn; snapshot ipn_url/request_body; state, attempt_count, next_attempt_at, lease_until/token, created_at/version; index tìm việc đến hạn |
+| `ipn_log` / Gateway — đã có | PK id; txn_ref FK → ipn_outbox; attempt, request_body, response_code, sent_at, finished_at, http_status/error_type; UNIQUE(txn_ref, attempt) |
 | `idempotency` / Gateway — đã có | PK request_id kiểu UUID; txn_ref tham chiếu logic để lưu cả TXN_NOT_FOUND; payer_account/amount làm fingerprint cùng txn_ref; http_status/response_body, created_at/version |
 
 Quan hệ qua ranh giới thành phần là tham chiếu bằng giá trị, không phải JPA association
@@ -118,7 +120,7 @@ nâng cấp một bảng cũ. Chưa cần thêm Flyway cho một phiên bản sc
   timeout không đồng nghĩa thất bại thanh toán. Không giữ transaction/khóa DB khi gọi
   HTTP. Merchant gọi Gateway xong mới cập nhật local, có thể khôi phục qua replay/B7.
 
-## 4. HMAC, QR, PIN đã triển khai; IPN và đối soát là dự kiến
+## 4. HMAC, QR, PIN, IPN đã triển khai; đối soát là dự kiến
 
 **HMAC B2 đã triển khai:** dùng UTF-8; bỏ signature; sort tên trường tăng dần; nối key=value bằng &,
 không URL-encode, không đổi khoảng trắng hay format timestamp trong lúc verify;
@@ -144,15 +146,14 @@ sai để hai request không vượt bộ đếm. Lần sai thứ ba trả 423 P
 thành công hoặc hết thời gian khóa reset bộ đếm. B4 lưu wallet_user bền vững và B5
 có account/ledger. PIN đúng mới được gọi HTTP, không gửi PIN sang Gateway.
 
-**IPN:** không HTTP trong transaction B5. Dự kiến tạo một bản ghi công việc IPN bền
-vững cùng transaction kết quả; sau commit worker quét/gửi. Có thể dùng một bảng nhỏ
-ipn_delivery (txn_ref UNIQUE, attempt_count, next_attempt_at, state, lease_until) để
-tránh mất thông báo khi tiến trình dừng giữa commit và dispatch; không cần broker.
-ipn_log chỉ là lịch sử lần gửi, không thay thế trạng thái công việc. Khi thực hiện B6,
-worker claim bằng khóa DB rồi thả transaction trước HTTP, lưu log và lịch retry trong
-transaction ngắn; lease cho phép phục hồi sau crash. Merchant kiểm lần lượt chữ ký,
-đơn, amount, trạng thái như bảng đề; khóa đơn khi cập nhật để chỉ một lần trả 00,
-lần lặp trả 02. Gateway dừng khi code 00/02, ghi cả timeout và HTTP lỗi vào ipn_log.
+**IPN B6:** `IpnEnqueuer` MANDATORY ghi `ipn_outbox` cùng transaction B5 khi SUCCESS
+hoặc FAILED. Snapshot URL/body/HMAC không đổi khi retry. Worker NEVER gọi claim
+trong transaction ngắn, HTTP RestClient ngoài transaction, rồi lưu ACK/lịch retry
+trong transaction khác. PK txn_ref và replay B5 ngăn job trùng. Row lock, lease/token
+và log attempt bền vững cho phép nhiều worker và thu hồi sau crash. Chỉ nhận 00/02
+trên HTTP 2xx là đã giao; ba attempt tổng cộng, lần đầu ngay khi claim, sau đó +10s,
++30s tính từ hoàn tất lần trước. Merchant xác thực HMAC trước; khóa đơn, kiểm owner,
+amount, txnRef và trạng thái trước khi cập nhật. Chi tiết và giới hạn ở mục 11.
 
 **Đối soát:** danh sách SUCCESS theo paid_at trong khoảng [đầu ngày +07, đầu ngày kế
 tiếp +07), cộng long; Merchant lấy snapshot local và dữ liệu Gateway qua HTTP ngoài
@@ -177,7 +178,7 @@ API báo cáo; nếu bật sửa missingInMerchant, phải verify B7 có HMAC v�
 | Cùng requestId nhưng khác txn/account/amount | B5 trả 409 IDEMPOTENCY_CONFLICT; không chuyển tiền lại và không trả dữ liệu outcome của payload khác |
 | Chữ ký response, query GET chưa minh họa | Quy tắc mọi tin Merchant–Gateway có HMAC: request GET ký merchantId + txnRef, reconciliation ký date + merchantId, đặt ở X-Signature; response ký toàn bộ JSON, đặt ở X-Signature để giữ nguyên JSON đề. Với giá trị array/object của B8, dùng JSON compact UTF-8, sort key đệ quy, giữ thứ tự array; Gateway sort transactions theo txnRef trước khi tạo response. Hai bên cần test vector chung ở B8; không tự bỏ ký response |
 | Wallet gọi GET Gateway trong B3 nhưng B7 nêu header Merchant | GET hiện phân biệt bằng credential đã xác thực: Wallet dùng Bearer token riêng, chỉ projection xác nhận; Merchant bắt buộc HMAC và quyền sở hữu. Header Merchant thiếu/sai/mixed không fallback Wallet. Không dùng query caller hoặc header vai trò tự khai để bỏ qua HMAC |
-| “3 lần” IPN nhưng liệt kê 3 khoảng chờ | Chọn tổng 3 lần gửi, chờ lần lượt 10s, 30s, 60s trước mỗi lần thử (mốc sớm nhất sau commit +10s, +40s, +100s, chưa kể thời gian HTTP); không gửi lần thứ tư. Có cấu hình rút ngắn trong test. Đáp ứng kịch bản #9 ba dòng log; ghi rõ trước B6 |
+| “3 lần” IPN nhưng liệt kê 3 khoảng chờ | Yêu cầu B6 mới làm rõ: tổng 3 attempt, lần đầu ngay khi worker claim sau commit, lần hai +10s, lần ba +30s từ kết thúc lần trước; mốc 0/10/40 nếu HTTP tức thời. Không lần thứ tư; thay quyết định dự kiến trước B6 |
 | Dữ liệu mẫu U002 thiếu PIN và full_name | Seed ở B4/B5; chọn tên mô tả và PIN giả lập 123456 cho U002, BCrypt khi lưu, ghi rõ seed. Chưa seed các thành phần ngoài B1 |
 | Chưa chỉ rõ ngày đối soát theo createdAt hay paidAt | Dùng ngày paidAt vì đối soát giao dịch thành công; múi giờ +07:00, interval nửa mở |
 
@@ -355,9 +356,60 @@ sequenceDiagram
   PROCESSING. Lỗi hệ thống: rollback về PENDING; retry cùng UUID an toàn.
 - Hết hạn commit EXPIRED và outcome 422. Amount mismatch giữ PENDING, cache lỗi 422.
   Clock kiểm sau payment lock; không cache lỗi hệ thống chưa hoàn tất.
-- PaymentCompleted được publish trong transaction; B6 tương lai dùng listener
-  AFTER_COMMIT và giao nhận bền vững. Hiện chưa có IPN, retry job hoặc outbox.
+- PaymentCompleted được publish trong transaction để quan sát. B6 ghi outbox trực
+  tiếp cùng transaction, không dựa vào listener/event trong RAM để bảo đảm giao nhận.
 
 219 test PASS: 185 B1–B3, 12 B4, 22 B5. Test B5 gồm 21 money/concurrency và một IT
 restart hai process production thật/H2 file. Xem [báo cáo B5](phase5-report.md).
-Dừng B5; Merchant có thể tiếp tục WAITING_PAYMENT cho đến B6/B7.
+Mốc B5 được giữ để đối chiếu. B6 hiện cập nhật Merchant qua IPN sau commit B5.
+
+## 11. B6: outbox, HTTP và Merchant transaction
+
+```mermaid
+sequenceDiagram
+    participant G as B5 Gateway/Bank
+    participant D as Gateway DB
+    participant W as IPN Worker
+    participant M as Merchant HTTP
+    G->>D: Transaction: tiền + ledger + payment + idempotency + outbox READY
+    G->>D: COMMIT
+    W->>D: Transaction: khóa outbox, LEASED + token, log IN_PROGRESS
+    D-->>W: COMMIT + snapshot request
+    W->>M: POST ipn_url + HMAC (không transaction Gateway)
+    M->>M: HMAC; transaction khóa đơn, kiểm dữ liệu, cập nhật; COMMIT
+    M-->>W: 00/02 hoặc lỗi
+    W->>D: Transaction: kiểm token, log kết quả + DELIVERED/READY/EXHAUSTED
+```
+
+- `gateway.ipn` sở hữu toàn bộ job/log/HTTP client. `merchant` có DTO/service IPN
+  riêng, không import Gateway. Chỉ thay B5 bằng hai lời gọi enqueue trong nhánh kết
+  quả terminal; không đổi BankTransferService, hợp đồng API hay khóa/idempotency B5.
+- `READY → LEASED → DELIVERED`; lỗi còn budget trở lại READY với next_attempt_at;
+  lỗi attempt thứ ba thành EXHAUSTED. Không có thao tác xóa job hoặc gửi lại tiền.
+  Unique(txn_ref,attempt), CHECK state/attempt/lease và @Version bổ trợ khóa DB.
+- Claim lấy danh sách txnRef scalar rồi SELECT FOR UPDATE và kiểm lại điều kiện;
+  không dùng entity đọc trước khóa hoặc mutex RAM để phối hợp worker. Log được ghi
+  cùng claim trước HTTP; DB lỗi trước commit claim thì chưa được gửi.
+- Lease 60s (cấu hình tối thiểu 15s), connect 3s/read 5s, poll 1s. Lease hết hạn:
+  attempt chưa rõ kết quả ghi UNKNOWN_AFTER_CRASH, tính lần tiếp theo +10/+30 kể từ
+  lúc thu hồi; nếu đã attempt 3 thì EXHAUSTED. Token ngăn ACK muộn ghi đè job đã
+  thu hồi. Attempt bỏ dở vẫn tiêu một slot vì không thể biết Merchant đã nhận chưa.
+- Merchant kiểm HMAC với secret MC001 cục bộ trước khi tra đơn. HMAC dùng scalar
+  canonicalization B2; bankRef/paidAt của FAILED được bỏ khỏi JSON và chuỗi ký.
+  Giá trị null cũng bị bỏ khi ký; paidAt khi nhận là String để không đổi format.
+  Sau đó khóa đơn, kiểm merchant sở hữu, amount, txnRef, trạng thái. Sai binding
+  txnRef trả 01 vì đề không dành code riêng. Chỉ WAITING_PAYMENT được chuyển sang
+  PAID/PAYMENT_FAILED; trạng thái khác trả 02 và giữ nguyên dữ liệu.
+- Chữ ký đúng nhưng status không phải SUCCESS/FAILED, SUCCESS thiếu bankRef/paidAt
+  hoặc FAILED chứa giá trị hai trường này trả 400 INVALID_REQUEST. JSON sai kiểu/
+  trường lạ bị chặn bởi lớp JSON hiện có, trước khi vào service.
+- Giao nhận có thể lặp sau mất ACK; Merchant lock/idempotency bảo đảm tác dụng một
+  lần. Lease ngăn hai claim đồng thời khi còn hiệu lực; không bảo đảm loại bỏ tuyệt
+  đối request cũ còn sống sau pause/partition vượt lease. Token chỉ fence cập nhật
+  Gateway; Merchant vẫn chịu trách nhiệm chống lặp. Không giữ khóa/transaction DB
+  xuyên HTTP để cố tạo exactly-once qua mạng.
+- SQL B6 chỉ thêm hai bảng/index, không tự tạo IPN cho các giao dịch terminal có
+  trước nâng cấp. H2 restart thật đã được kiểm thử; PostgreSQL chưa được chạy.
+  B7/B8, vận hành requeue EXHAUSTED và chính sách lưu/xóa audit chưa triển khai.
+
+Lệnh, kết quả kiểm thử và phân loại ca nằm trong [báo cáo B6](phase6-report.md).

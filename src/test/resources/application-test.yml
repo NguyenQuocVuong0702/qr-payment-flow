@@ -1,3 +1,7 @@
+app:
+  gateway:
+    ipn:
+      enabled: false
 spring:
   datasource:
     url: jdbc:h2:mem:qr-payment-test;DB_CLOSE_DELAY=-1

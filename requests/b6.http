@@ -1,0 +1,51 @@
+@baseUrl = http://localhost:8080
+# Điền các giá trị nhận từ B1/B2. MC001.ipn_url mặc định dùng cổng 8080.
+@orderId = ORD20261102001
+@txnRef = TX00000001
+@requestId = 157b6331-c67e-4987-84ef-91e57150c077
+
+### 1. B1: tạo đơn (lấy orderId trả về để điền phía trên)
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":55000,"description":"Ao thun"}
+
+### 2. B2: khởi tạo payment (lấy txnRef trả về để điền phía trên)
+POST {{baseUrl}}/api/merchant/orders/{{orderId}}/payments
+Content-Type: application/json
+
+{"expireMinutes":15}
+
+### 3. B5 commit tự tạo outbox; B6 worker tự POST IPN, không cần endpoint dispatch
+POST {{baseUrl}}/api/wallet/payments
+Content-Type: application/json
+
+{"userId":"U001","txnRef":"{{txnRef}}","amount":55000,"pin":"123456","requestId":"{{requestId}}"}
+
+### 4. Wallet replay cùng UUID không tạo thêm outbox hoặc chuyển tiền
+POST {{baseUrl}}/api/wallet/payments
+Content-Type: application/json
+
+{"userId":"U001","txnRef":"{{txnRef}}","amount":55000,"pin":"123456","requestId":"{{requestId}}"}
+
+### 5. Sai chữ ký: HTTP 200, {"code":"97","message":"Invalid signature"}; đơn giữ nguyên
+POST {{baseUrl}}/api/merchant/ipn
+Content-Type: application/json
+
+{"txnRef":"{{txnRef}}","orderId":"{{orderId}}","amount":55000,"status":"SUCCESS","bankRef":"BK20261102000001","paidAt":"2026-11-02T09:03:12+07:00","signature":"0000000000000000000000000000000000000000000000000000000000000000"}
+
+### 6. Replay IPN hợp lệ: thay toàn bộ body dưới bằng request_body trong ipn_outbox
+# Giữ nguyên paidAt, bankRef, signature đã lưu; không dùng dữ liệu giả từ ví dụ.
+# Nếu worker đã giao thành công: HTTP 200, code 02, không cập nhật đơn lần hai.
+POST {{baseUrl}}/api/merchant/ipn
+Content-Type: application/json
+
+{"txnRef":"COPY_FROM_IPN_OUTBOX","orderId":"COPY_FROM_IPN_OUTBOX","amount":55000,"status":"SUCCESS","bankRef":"COPY_FROM_IPN_OUTBOX","paidAt":"COPY_FROM_IPN_OUTBOX","signature":"COPY_FROM_IPN_OUTBOX"}
+
+# Kiểm chứng trong H2 console dev, cùng JDBC URL của ứng dụng:
+# SELECT txn_ref,state,attempt_count,next_attempt_at,lease_until FROM ipn_outbox;
+# SELECT txn_ref,attempt,response_code,http_status,error_type,sent_at,finished_at FROM ipn_log ORDER BY id;
+# SELECT order_id,txn_ref,status,paid_at FROM orders;
+# FAILED: tạo một đơn/txnRef mới, UUID mới, dùng U002 (số dư seed 10000 < 55000).
+# Worker gửi status FAILED, không có bankRef/paidAt; Merchant cập nhật PAYMENT_FAILED.
+# Kịch bản 500/timeout/crash có HTTP stub/Clock và real-process IT, xem phase6-report.md.
