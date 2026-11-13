@@ -1,6 +1,10 @@
 spring:
   application:
     name: qr-payment-flow
+  task:
+    scheduling:
+      pool:
+        size: 2
   profiles:
     default: dev
   jpa:

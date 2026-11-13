@@ -12,8 +12,10 @@ public class IpnJobStore {
     private final IpnLogRepository logs;
     private final IpnProperties properties;
     private final Clock clock;
-    public IpnJobStore(IpnOutboxRepository jobs, IpnLogRepository logs, IpnProperties properties, Clock clock) {
+    private final IpnAuditPayload audit;
+    public IpnJobStore(IpnOutboxRepository jobs, IpnLogRepository logs, IpnProperties properties, Clock clock, IpnAuditPayload audit) {
         this.jobs = jobs; this.logs = logs; this.properties = properties; this.clock = clock;
+        this.audit = audit;
     }
     @Transactional
     public IpnClaim claimNext() {
@@ -31,7 +33,7 @@ public class IpnJobStore {
             }
             if (!job.ready(now)) continue; // Another worker won after the unlocked candidate query.
             var claim = job.claim(now, now.plus(properties.lease()));
-            logs.saveAndFlush(new IpnLog(claim, now));
+            logs.saveAndFlush(new IpnLog(claim, audit.redact(claim.requestBody()), now));
             return claim;
         }
         return null;

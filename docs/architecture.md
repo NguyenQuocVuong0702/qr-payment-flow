@@ -1,12 +1,12 @@
-# Phân tích và thiết kế — B1–B6
+# Phân tích và thiết kế — B1–B7
 
 Tài liệu gốc: [bai-tap-luong-thanh-toan-qr.md](../bai-tap-luong-thanh-toan-qr.md).
 Khi có khác biệt, quy tắc nghiệp vụ, API, mã lỗi và kiểm thử trong đề được ưu tiên.
-Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1–B6. Phần B7–B8 bên dưới
-vẫn là thiết kế cho các giai đoạn sau, chưa có workflow tương ứng.
+Tài liệu này phân tích B1–B8; code hiện tại thực hiện B1–B7. B8 vẫn là thiết kế
+cho giai đoạn sau, chưa có API/workflow đối soát.
 Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md) và
 [báo cáo B3](phase3-report.md), [B4](phase4-report.md), [B5](phase5-report.md)
-và [B6](phase6-report.md).
+và [B6](phase6-report.md), [B7](phase7-report.md).
 
 ## 1. Quan hệ B1–B8
 
@@ -58,12 +58,12 @@ IPN. Seed User/Bank chỉ insert khi thiếu, không reset khi restart.
 |---|---|
 | `orders` / Merchant — đã tạo | PK `order_id`; merchant_id; BIGINT amount; VARCHAR(19) description; status; nullable UNIQUE txn_ref; created_at; nullable paid_at; version cho optimistic locking |
 | `merchant` / Gateway — đã tạo | PK merchant_id; name, city, mcc, secret_key, ipn_url; account_no là giá trị. B5 kiểm account tồn tại dưới khóa Bank, không FK metadata để bảo toàn registry B2 |
-| `payment_txn` / Gateway — đã tạo | PK txn_ref; merchant_id FK → merchant; UNIQUE(merchant_id, order_id); amount, description, status, qr_string, expire_at; nullable payer_account, UNIQUE bank_ref, fail_reason, paid_at; created_at/version. Index tra cứu/hết hạn sẽ thêm khi có B7/B8 |
+| `payment_txn` / Gateway — đã tạo | PK txn_ref; merchant_id FK → merchant; UNIQUE(merchant_id, order_id); amount, description, status, qr_string, expire_at; nullable payer_account, UNIQUE bank_ref, fail_reason, paid_at; created_at/version. B7 thêm index(status,expire_at) |
 | `account` / Bank — đã có | PK account_no; owner_name; balance BIGINT CHECK balance >= 0; version |
 | `ledger_entry` / Bank — đã có | PK id; txn_ref FK → payment_txn; bank_ref; account_no FK → account; DEBIT/CREDIT; amount > 0; created_at; UNIQUE(bank_ref,direction), UNIQUE(txn_ref,direction) |
 | `wallet_user` / Wallet — đã có | PK user_id; full_name; account_no tham chiếu logic; pin_hash BCrypt; failed_pin_attempts, pin_locked_until, version |
 | `ipn_outbox` / Gateway — đã có | PK txn_ref FK → payment_txn; snapshot ipn_url/request_body; state, attempt_count, next_attempt_at, lease_until/token, created_at/version; index tìm việc đến hạn |
-| `ipn_log` / Gateway — đã có | PK id; txn_ref FK → ipn_outbox; attempt, request_body, response_code, sent_at, finished_at, http_status/error_type; UNIQUE(txn_ref, attempt) |
+| `ipn_log` / Gateway — đã có | PK id; txn_ref FK → ipn_outbox; attempt, request_body đã bỏ signature, response_code, sent_at, finished_at, http_status/error_type; UNIQUE(txn_ref, attempt) |
 | `idempotency` / Gateway — đã có | PK request_id kiểu UUID; txn_ref tham chiếu logic để lưu cả TXN_NOT_FOUND; payer_account/amount làm fingerprint cùng txn_ref; http_status/response_body, created_at/version |
 
 Quan hệ qua ranh giới thành phần là tham chiếu bằng giá trị, không phải JPA association
@@ -216,9 +216,9 @@ sequenceDiagram
   verify hoặc attach rollback để đơn còn CREATED; retry cùng orderId lấy đúng txn cũ.
   Không có tự động retry nền hoặc cơ chế tạo lại B1. Cơ chế này cũng xử lý crash giữa
   hai commit, miễn client tiếp tục cùng orderId và giao dịch còn PENDING.
-- Gateway trả 201 cho cả tạo và replay; giữ nguyên QR/hạn/description cũ nếu amount
-  không đổi. Chưa thực hiện job hết hạn, chuyển trạng thái thanh toán hoặc tạo lại
-  giao dịch terminal. Các enum/cột cho giai đoạn sau chưa có nghiệp vụ thực thi.
+- Gateway trả 201 cho cả tạo và replay; giữ nguyên txnRef/QR/hạn/description cũ nếu
+  amount không đổi, kể cả khi job B7 đã chuyển EXPIRED. Merchant B2 vẫn chỉ nhận
+  PENDING như hợp đồng cũ; dùng B7 để tra cứu/sync trạng thái terminal, không tạo txn mới.
 
 ## 7. Chi tiết hợp đồng B2 và giả định bổ sung
 
@@ -311,7 +311,7 @@ sequenceDiagram
 Kết quả B3: 185 test PASS (118 cũ + 67 mới), không failure/error/skipped. Chưa có
 full flow B1–B8; các ca CRC sửa tên và sửa amount rồi tính lại CRC ở B3 đã được test.
 
-Mốc B3 giữ nguyên API. GET chỉ là nền tảng cần cho B3/B7, chưa có workflow B7/job hết hạn.
+Mốc B3 giữ nguyên API. B7 hiện tái sử dụng GET này, không thay đổi quyền đọc Wallet.
 
 ## 10. B4–B5: transaction, idempotency và khóa tiền
 
@@ -410,6 +410,51 @@ sequenceDiagram
   xuyên HTTP để cố tạo exactly-once qua mạng.
 - SQL B6 chỉ thêm hai bảng/index, không tự tạo IPN cho các giao dịch terminal có
   trước nâng cấp. H2 restart thật đã được kiểm thử; PostgreSQL chưa được chạy.
-  B7/B8, vận hành requeue EXHAUSTED và chính sách lưu/xóa audit chưa triển khai.
+  B8, vận hành requeue EXHAUSTED và retention audit chưa triển khai. B7 chủ động
+  đồng bộ đơn sau IPN lỗi và bỏ chữ ký khỏi log, giữ nguyên outbox đã ký.
 
 Lệnh, kết quả kiểm thử và phân loại ca nằm trong [báo cáo B6](phase6-report.md).
+
+## 12. B7: tra cứu Merchant, đồng bộ và hết hạn
+
+- Gateway GET từ B3 đã đáp ứng B7: HMAC `merchantId` + `txnRef`, header
+  X-Merchant-Id/X-Signature, kiểm ownership và ký projection/error đã xác thực.
+  B7 kiểm thử lại các trạng thái terminal và ranh giới Wallet; không thay API/DTO Gateway.
+- `GET /api/merchant/orders/{orderId}` trả snapshot local có owner/status/txnRef và
+  paidAt nếu có, không ghi DB hoặc gọi HTTP. Đơn không thuộc Merchant local trả 404.
+- `POST /api/merchant/orders/{orderId}/sync` không nhận amount/status từ client.
+  MerchantOrderLookupService NEVER đọc snapshot qua store, gọi GatewayPaymentClient
+  qua HTTP, rồi store khóa Order và kiểm lại trước khi ghi. DTO HTTP của Merchant
+  độc lập; không import Gateway service/repository/domain hoặc dùng transaction xuyên HTTP.
+- Tái sử dụng GatewayPaymentClient cho B2/B7 và cùng helper verify HMAC; B7 có client
+  dùng socket timeout 3s/5s, không redirect, giới hạn body 16 KiB. BoundedHttpRequests
+  được tách từ factory B6 không đổi hành vi IPN, transport B2 giữ nguyên.
+- HMAC response phải đúng và chỉ có một header; kiểm schema, txnRef/orderId/amount,
+  createdAt, status; SUCCESS bắt buộc bankRef/paidAt hợp lệ. FAILED/PENDING/PROCESSING/
+  EXPIRED không mang bankRef/paidAt. Không chấp nhận trường lạ hoặc projection Wallet.
+  Quyền sở hữu remote do Gateway kiểm theo key/header, local do store kiểm owner.
+- Store dùng findForUpdate giống IPN. Recheck binding sau HTTP; chỉ WAITING_PAYMENT
+  chuyển PAID/PAYMENT_FAILED/EXPIRED. Các trạng thái terminal là no-op; stale PENDING
+  hay SUCCESS không đảo trạng thái IPN đã commit. Order.confirmPayment được dùng lại
+  cho SUCCESS/FAILED; Order.expire bổ sung đúng cạnh còn lại của state machine.
+- Gateway không phản hồi/5xx/timeout trả 502, không ghi đơn. Dữ liệu không xác thực/
+  sai binding trả INVALID_GATEWAY_RESPONSE; chỉ TXN_NOT_FOUND có HMAC hợp lệ được
+  chuyển 404. Không phản chiếu message remote tùy ý hoặc dùng thời gian local để đoán.
+- PaymentExpiryJob lấy scalar ứng viên PENDING đến hạn. PaymentExpiryTransaction
+  khóa từng PK bằng findForUpdate như B5; đọc Clock sau khóa, recheck PENDING và
+  expireAt <= now, gọi PaymentTxn.expire và flush. Mỗi PK một transaction ngắn; job
+  không chạm Bank, idempotency, outbox hoặc publish PaymentCompleted.
+- Confirm lấy khóa và kiểm trước hạn được xử lý theo B5, kể cả lúc Bank hoàn tất đã
+  qua hạn; job chờ rồi thấy SUCCESS/FAILED và bỏ qua. Nếu job hoặc confirm kiểm tại/
+  sau hạn trước, giao dịch EXPIRED và confirm bị từ chối. Không bulk update bỏ qua
+  @Version/state machine; nhiều worker hết hạn cũng chỉ một lần cập nhật.
+- Scheduler fixedDelay 60000ms mặc định, bật riêng bằng app.gateway.expiry.enabled,
+  interval-millis cho test. Pool scheduler 2 luồng để IPN không chặn hết hạn; test
+  profile tắt cả hai lịch, test scheduler riêng bật 25ms để xác nhận thực sự chạy.
+- B7 chỉ thêm index payment_txn(status,expire_at); không sửa dữ liệu tài chính.
+  IpnAuditPayload bỏ signature trước khi tạo IpnLog, đồng thời ApplicationRunner
+  làm sạch log B6 cũ. Migration chỉ UPDATE request_body, giữ nguyên ID/outcome/time.
+  @DynamicUpdate trên IpnLog ngăn worker giữ entity cũ ghi lại chữ ký khi hoàn tất ACK
+  đồng thời với redaction. Outbox giữ byte-for-byte payload đã ký; không đổi retry.
+
+Phân loại kiểm thử, lệnh chạy và giới hạn ở [báo cáo B7](phase7-report.md).

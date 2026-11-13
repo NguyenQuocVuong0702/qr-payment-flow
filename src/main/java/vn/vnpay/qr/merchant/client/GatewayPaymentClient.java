@@ -1,6 +1,7 @@
 package vn.vnpay.qr.merchant.client;
 
 import java.util.Map;
+import java.util.Set;
 import java.io.IOException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -10,13 +11,16 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import vn.vnpay.qr.common.crypto.HmacSigner;
+import vn.vnpay.qr.common.config.BoundedHttpRequests;
 import vn.vnpay.qr.common.error.ApiException;
 import vn.vnpay.qr.merchant.config.MerchantGatewayProperties;
 import vn.vnpay.qr.merchant.service.OrderPaymentSnapshot;
+import vn.vnpay.qr.merchant.api.OrderDetails;
 
 @Component
 public class GatewayPaymentClient {
     private final RestClient client;
+    private final RestClient lookupClient;
     private final MerchantGatewayProperties properties;
     private final ObjectMapper mapper;
     private final HmacSigner hmac;
@@ -24,6 +28,7 @@ public class GatewayPaymentClient {
     public GatewayPaymentClient(RestClient.Builder builder, MerchantGatewayProperties properties,
             ObjectMapper mapper, HmacSigner hmac) {
         this.client = builder.clone().baseUrl(properties.baseUrl()).build();
+        this.lookupClient = builder.clone().baseUrl(properties.baseUrl()).requestFactory(BoundedHttpRequests.factory()).build();
         this.properties = properties;
         this.mapper = mapper;
         this.hmac = hmac;
@@ -46,13 +51,7 @@ public class GatewayPaymentClient {
                         if (json == null || !json.isObject()) {
                             throw invalidResponse();
                         }
-                        try {
-                            if (!hmac.verify(json, properties.secretKey(), reply.getHeaders().getFirst("X-Signature"))) {
-                                throw invalidResponse();
-                            }
-                        } catch (IllegalArgumentException ex) {
-                            throw invalidResponse();
-                        }
+                        verify(json, reply.getHeaders().getFirst("X-Signature"));
                         if (reply.getStatusCode().value() != 201) {
                             // Forward only authenticated, recognized protocol errors; no remote message reflection.
                             String code = json.path("errorCode").asText();
@@ -83,6 +82,52 @@ public class GatewayPaymentClient {
             throw new ApiException(HttpStatus.BAD_GATEWAY, "GATEWAY_UNAVAILABLE",
                     "Gateway result is unknown; retry payment creation with the same orderId");
         }
+    }
+
+    public GatewayPaymentStatus lookup(OrderDetails order) {
+        var fields = mapper.createObjectNode().put("merchantId", order.merchantId()).put("txnRef", order.txnRef());
+        try {
+            var result = lookupClient.get().uri("/api/gateway/payments/{txnRef}", order.txnRef())
+                    .header("X-Merchant-Id", order.merchantId()).header("X-Signature", hmac.sign(fields, properties.secretKey()))
+                    .exchange((request, reply) -> {
+                        if (reply.getStatusCode().is5xxServerError()) throw unavailable();
+                        try {
+                            byte[] bytes = reply.getBody().readNBytes(16385);
+                            if (bytes.length > 16384) throw invalidResponse();
+                            JsonNode json = mapper.readTree(bytes);
+                            var signatures = reply.getHeaders().get("X-Signature");
+                            if (signatures == null || signatures.size() != 1) throw invalidResponse();
+                            verify(json, signatures.getFirst());
+                            if (reply.getStatusCode().value() == 404 && "TXN_NOT_FOUND".equals(json.path("errorCode").asText())) {
+                                throw new ApiException(HttpStatus.NOT_FOUND, "TXN_NOT_FOUND", "Payment transaction not found");
+                            }
+                            if (reply.getStatusCode().value() != 200) throw invalidResponse();
+                            var names = json.fieldNames();
+                            var allowed = Set.of("txnRef", "orderId", "amount", "status", "bankRef", "createdAt", "paidAt");
+                            while (names.hasNext()) if (!allowed.contains(names.next())) throw invalidResponse();
+                            return mapper.treeToValue(json, GatewayPaymentStatus.class);
+                        } catch (java.net.SocketTimeoutException ex) { throw unavailable(); }
+                        catch (IOException | IllegalArgumentException ex) { throw invalidResponse(); }
+                    });
+            if (result == null || !order.txnRef().equals(result.txnRef()) || !order.orderId().equals(result.orderId())
+                    || result.amount() == null || result.amount() != order.amount() || result.createdAt() == null
+                    || result.status() == null || !Set.of("PENDING", "PROCESSING", "SUCCESS", "FAILED", "EXPIRED").contains(result.status())) {
+                throw invalidResponse();
+            }
+            if ("SUCCESS".equals(result.status())) {
+                if (result.bankRef() == null || result.bankRef().isBlank() || result.bankRef().length() > 32
+                        || result.paidAt() == null || result.paidAt().isBefore(result.createdAt())) throw invalidResponse();
+            } else if (result.bankRef() != null || result.paidAt() != null) throw invalidResponse();
+            return result;
+        } catch (RestClientException ex) { throw unavailable(); }
+    }
+    private void verify(JsonNode json, String signature) {
+        try {
+            if (json == null || !json.isObject() || !hmac.verify(json, properties.secretKey(), signature)) throw invalidResponse();
+        } catch (IllegalArgumentException ex) { throw invalidResponse(); }
+    }
+    private static ApiException unavailable() {
+        return new ApiException(HttpStatus.BAD_GATEWAY, "GATEWAY_UNAVAILABLE", "Gateway lookup is unavailable; order status is unchanged");
     }
 
     private static ApiException invalidResponse() {

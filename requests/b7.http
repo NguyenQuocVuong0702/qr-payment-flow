@@ -1,0 +1,59 @@
+@baseUrl = http://localhost:8080
+# Lấy orderId và txnRef thực tế từ response B1/B2 để điền lại các biến.
+@orderId = ORD20261113001
+@txnRef = TX00000001
+@requestId = fa82028b-1994-4baa-aeb4-44676eb840f3
+# Chữ ký dưới đúng cho MC001 + TX00000001, key mẫu secret-mc001.
+# Nếu đổi txnRef, ký lại canonical: merchantId=MC001&txnRef=<txnRef thực tế>.
+@lookupSignature = 6da077da180daf4aa480006c8bfa0287ab82ad25fb6e1e2785c7c91acaaffdec
+
+### 1. B1: tạo đơn, vẫn trả CREATED
+POST {{baseUrl}}/api/merchant/orders
+Content-Type: application/json
+
+{"amount":55000,"description":"Ao thun"}
+
+### 2. GET local: CREATED chưa có txnRef; không gọi Gateway
+GET {{baseUrl}}/api/merchant/orders/{{orderId}}
+
+### 3. B2: tạo thanh toán hạn một phút, điền txnRef trả về
+POST {{baseUrl}}/api/merchant/orders/{{orderId}}/payments
+Content-Type: application/json
+
+{"expireMinutes":1}
+
+### 4. B7: Gateway lookup có HMAC, chỉ đúng Merchant sở hữu được đọc
+GET {{baseUrl}}/api/gateway/payments/{{txnRef}}
+X-Merchant-Id: MC001
+X-Signature: {{lookupSignature}}
+
+### 5. GET local chỉ trả trạng thái hiện có, không tự ghi trạng thái
+GET {{baseUrl}}/api/merchant/orders/{{orderId}}
+
+### 6. Sync chủ động; Merchant tự ký HTTP GET Gateway, không cần body phía client
+POST {{baseUrl}}/api/merchant/orders/{{orderId}}/sync
+
+### 7. B4/B5: thanh toán trước hạn; B6 tự gửi IPN
+POST {{baseUrl}}/api/wallet/payments
+Content-Type: application/json
+
+{"userId":"U001","txnRef":"{{txnRef}}","amount":55000,"pin":"123456","requestId":"{{requestId}}"}
+
+### 8. Xem/sync sau thanh toán (hoặc IPN bị mất): trạng thái PAID
+POST {{baseUrl}}/api/merchant/orders/{{orderId}}/sync
+
+### 9. Gateway từ chối sai chữ ký: 401 INVALID_SIGNATURE
+GET {{baseUrl}}/api/gateway/payments/{{txnRef}}
+X-Merchant-Id: MC001
+X-Signature: 0000000000000000000000000000000000000000000000000000000000000000
+
+### 10. Không có đơn: 404 ORDER_NOT_FOUND
+GET {{baseUrl}}/api/merchant/orders/ABSENT
+
+# Hết hạn: tạo một đơn/txnRef mới, expireMinutes=1, không gọi Wallet payments.
+# Job mặc định chạy mỗi phút; sau khi Gateway EXPIRED, POST sync cập nhật Order EXPIRED.
+# Có thể cấu hình app.gateway.expiry.interval-millis=1000 khi demo để poll mỗi giây;
+# expireMinutes vẫn đúng 1..60. Kiểm thử tự động dùng Clock, không chờ thật một phút.
+# IPN lỗi: đổi registry ipn_url sang HTTP stub trả 500 TRƯỚC khi confirm.
+# Sau ba attempt IPN, POST sync vẫn lấy SUCCESS từ Gateway và cập nhật PAID.
+# Không sửa amount/status/txnRef trong DB để giả lập kết quả ở môi trường đang dùng.

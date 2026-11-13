@@ -69,6 +69,10 @@ public class Order {
         this.status = OrderStatus.WAITING_PAYMENT;
     }
     public String getMerchantId() { return merchantId; }
+    public void expire() {
+        if (status != OrderStatus.WAITING_PAYMENT) throw new IllegalStateException("Order is not waiting for payment");
+        status = OrderStatus.EXPIRED;
+    }
     public void confirmPayment(boolean success, Instant paidAt) {
         if (status != OrderStatus.WAITING_PAYMENT) throw new IllegalStateException("Order is not waiting for payment");
         status = success ? OrderStatus.PAID : OrderStatus.PAYMENT_FAILED;

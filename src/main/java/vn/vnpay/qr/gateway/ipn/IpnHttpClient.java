@@ -5,7 +5,7 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import vn.vnpay.qr.common.config.BoundedHttpRequests;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
@@ -15,14 +15,7 @@ public class IpnHttpClient {
     private final RestClient client;
     private final ObjectMapper mapper;
     public IpnHttpClient(RestClient.Builder builder, ObjectMapper mapper) {
-        var factory = new SimpleClientHttpRequestFactory() {
-            @Override protected void prepareConnection(java.net.HttpURLConnection connection, String method) throws IOException {
-                super.prepareConnection(connection, method);
-                connection.setInstanceFollowRedirects(false);
-            }
-        };
-        factory.setConnectTimeout(3000); factory.setReadTimeout(5000);
-        client = builder.clone().requestFactory(factory).build(); this.mapper = mapper;
+        client = builder.clone().requestFactory(BoundedHttpRequests.factory()).build(); this.mapper = mapper;
     }
     public IpnDeliveryResult send(IpnClaim claim) {
         try {

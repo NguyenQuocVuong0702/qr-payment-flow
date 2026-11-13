@@ -1,5 +1,7 @@
 app:
   gateway:
+    expiry:
+      enabled: false
     ipn:
       enabled: false
 spring:
