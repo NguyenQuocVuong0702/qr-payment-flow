@@ -2,8 +2,8 @@
 
 Tài liệu gốc: [bai-tap-luong-thanh-toan-qr.md](../bai-tap-luong-thanh-toan-qr.md).
 Khi có khác biệt, quy tắc nghiệp vụ, API, mã lỗi và kiểm thử trong đề được ưu tiên.
-Code hiện tại thực hiện đủ tám bước B1–B8 và bổ sung đối soát qua CSV cùng hoàn tiền. Cả hai
-cách đối soát đều chỉ đọc dữ liệu.
+Code hiện tại thực hiện đủ tám bước B1–B8 cùng ba mục cộng điểm: đối soát CSV,
+hoàn tiền và Merchant/Gateway/Wallet chạy trên ba cổng với database riêng.
 Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md) và
 [báo cáo B3](phase3-report.md), [B4](phase4-report.md), [B5](phase5-report.md)
 và [B6](phase6-report.md), [B7](phase7-report.md), [B8](phase8-report.md).
@@ -33,8 +33,8 @@ flowchart LR
     B --> L[(account / ledger_entry)]
 ```
 
-Một ứng dụng Java 21 / Spring Boot 3.5.16 / Maven 3.9.16 / H2, một datasource và
-một transaction manager. Chọn Boot 3.5 để dùng Spring MVC, Jackson 2 và JUnit 5 quen
+Chế độ mặc định Java 21 / Spring Boot 3.5.16 / Maven 3.9.16 / H2 có một datasource
+và một transaction manager. Chọn Boot 3.5 để dùng Spring MVC, Jackson 2 và JUnit 5 quen
 thuộc với bài học. Java 21 nằm trong dải hỗ trợ của
 [Spring Boot 3.5](https://docs.spring.io/spring-boot/3.5/system-requirements.html).
 [Maven Wrapper](https://maven.apache.org/tools/wrapper/) cố định phiên bản Maven,
@@ -75,7 +75,8 @@ Tiền luôn là `long`/BIGINT VND. Mốc thời gian lưu `Instant`/TIMESTAMP W
 API xuất ISO-8601 với offset +07:00, ngày nghiệp vụ và QR dùng Asia/Ho_Chi_Minh.
 Clock được inject, test không phải chờ thời gian thực.
 
-`schema.sql` tạo bảng bằng IF NOT EXISTS; Hibernate `validate`, không dùng create-drop
+`db/gateway.sql`, `db/merchant.sql` và `db/wallet.sql` tạo bảng bằng IF NOT EXISTS.
+Hibernate `validate`, không dùng create-drop
 trên dev. H2 dev dùng file `data/qr-payment` với `WRITE_DELAY=0` để đồng bộ ghi file
 khi commit, test dùng memory và dọn dữ liệu từng test. Phép thử dừng tiến trình ngay
 sau HTTP 201 phát hiện chế độ ghi trễ mặc định có thể mất đơn vừa commit, nên chọn
@@ -549,3 +550,30 @@ vẫn trả đúng khi có lần hoàn khác sau đó. Refund được báo tr�
 B6 tiếp tục giao IPN cho lần thu gốc. B7 có thể xác minh lần thu đã thành công từ
 trạng thái `REFUNDED` nếu đơn bỏ lỡ IPN. B8 và CSV đối soát số tiền thu ban đầu
 theo `paidAt`, còn số tiền hoàn tra từ lịch sử refund.
+
+## Ba tiến trình độc lập
+
+Entry point `QrPaymentApplication` chọn cấu hình Spring qua `--app.mode`. Cấu hình
+mặc định nạp đủ ba package. Trong chế độ tách riêng, mỗi tiến trình scan package
+của mình và `common`, rồi giới hạn JPA entity/repository và SQL schema theo chủ sở
+hữu. Ba database H2 file có đường dẫn riêng nên mỗi tiến trình có thể khởi động
+lại độc lập. B2, B3, B4, B6, B7, B8 và refund giữ HTTP và chữ ký như đã mô tả.
+
+Gateway và Bank vẫn nằm cùng tiến trình để chuyển tiền và ghi ledger, idempotency,
+outbox trong cùng transaction. Merchant nạp entity đơn. Wallet nạp entity người
+dùng và tham chiếu `accountNo` logic sang Gateway qua request xác thực. CSV nhập
+đã mang chữ ký cùng snapshot nên Merchant có thể đối soát khi Gateway dừng.
+
+```mermaid
+flowchart LR
+    W[Wallet 8183] -->|scan và confirm HTTP| G[Gateway và Bank 8181]
+    M[Merchant 8182] -->|tạo QR, sync, đối soát HTTP| G
+    G -->|IPN HTTP| M
+    W --> WD[(H2 wallet)]
+    M --> MD[(H2 merchant)]
+    G --> GD[(H2 gateway)]
+```
+
+`SplitApplicationsIT` khởi động ba JVM trên cổng tạm, thực hiện B1–B8 và refund.
+Test còn tải CSV từ Gateway, dừng tiến trình Gateway rồi gửi CSV vào Merchant.
+Cuối ca test, JDBC xác nhận từng file database chỉ có bảng do tiến trình đó sở hữu.

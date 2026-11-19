@@ -18,6 +18,7 @@ spring:
   sql:
     init:
       mode: always
+      schema-locations: classpath:db/gateway.sql,classpath:db/merchant.sql,classpath:db/wallet.sql
   jackson:
     serialization:
       write-dates-as-timestamps: false

@@ -1,0 +1,7 @@
+spring:
+  datasource:
+    username: sa
+    password: ${QR_DB_PASSWORD:}
+  sql:
+    init:
+      data-locations: optional:classpath:db/no-split-data.sql

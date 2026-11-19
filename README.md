@@ -2,8 +2,8 @@
 
 Ứng dụng bài tập Java 21, Spring Boot 3.5.16, Maven 3.9.16, H2.
 Đã triển khai **B1–B8**: tạo đơn, QR động, scan, PIN, chuyển tiền giả lập, IPN bền
-vững, tra cứu/đồng bộ, hết hạn và đối soát cuối ngày. Phần cộng điểm bổ sung đối soát CSV
-và hoàn tiền toàn phần hoặc một phần.
+vững, tra cứu/đồng bộ, hết hạn và đối soát cuối ngày. Đã làm cả ba mục cộng điểm:
+đối soát CSV, hoàn tiền toàn phần/một phần và chạy thành ba ứng dụng riêng.
 
 - [Đề bài chính thức](bai-tap-luong-thanh-toan-qr.md)
 - [Phân tích B1–B8, mô hình dữ liệu, transaction và các quyết định](docs/architecture.md)
@@ -61,9 +61,9 @@ src/main/java/vn/vnpay/qr/
 src/main/resources/
   application.yml
   application-dev.yml                 H2 file, H2 console local
-  schema.sql                          orders, merchant, payment_txn, wallet_user,
+  db/{gateway,merchant,wallet}.sql    orders, merchant, payment_txn, wallet_user,
                                       account, ledger_entry, idempotency, ipn_outbox,
-                                      ipn_log, sequence
+                                      ipn_log, refund_txn, refund_ledger_entry, sequence
   data.sql                            Seed MC001 nếu chưa tồn tại
 src/test/java/vn/vnpay/qr/
   ApplicationContextTest.java
@@ -705,12 +705,13 @@ function Invoke-QrRefund($qrRef, $qrAmount, $qrRequestId) {
     try {
         $qrSignature = [BitConverter]::ToString($qrHmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($qrData))).Replace('-', '').ToLowerInvariant()
     } finally { $qrHmac.Dispose() }
-    Invoke-RestMethod -Method Post -Uri "http://localhost:8080/api/gateway/payments/$qrRef/refund" `
+    Invoke-RestMethod -Method Post -Uri "$qrGateway/api/gateway/payments/$qrRef/refund" `
       -ContentType 'application/json' -Headers @{'X-Merchant-Id'='MC001'; 'X-Signature'=$qrSignature} `
       -Body (@{amount=$qrAmount; requestId=$qrRequestId} | ConvertTo-Json -Compress)
 }
 
-$qrRef = 'TX00000002' # Thay bằng txnRef vừa thanh toán nếu dùng giao dịch khác.
+$qrGateway = 'http://localhost:8080' # Chế độ tách riêng dùng cổng 8181.
+$qrRef = 'TX00000002' # Thay bằng txnRef thực tế của giao dịch muốn hoàn.
 $qrPartialId = [guid]::NewGuid().ToString()
 Invoke-QrRefund $qrRef 20000 $qrPartialId
 Invoke-QrRefund $qrRef 20000 $qrPartialId # Gửi lại, cùng refundRef.
@@ -721,6 +722,44 @@ B8 và CSV đối soát **số tiền thu ban đầu** theo ngày `paidAt`, kể
 hoàn hết. Merchant giữ `PAID` để ghi nhận lần thu ban đầu. Hoàn tiền có lịch sử riêng
 trong `refund_txn` / `refund_ledger_entry`. Báo cáo doanh thu ròng sẽ cần trừ phần hoàn
 theo quy tắc kế toán của hệ thống sử dụng báo cáo.
+
+## Cộng điểm — chạy ba ứng dụng riêng
+
+Build một lần từ thư mục dự án:
+
+```powershell
+.\mvnw.cmd -DskipTests package
+```
+
+Mở **ba terminal** tại cùng thư mục. Chạy mỗi lệnh ở một terminal:
+
+```powershell
+java -jar target/qr-payment-flow-0.0.1-SNAPSHOT.jar --app.mode=gateway
+java -jar target/qr-payment-flow-0.0.1-SNAPSHOT.jar --app.mode=merchant
+java -jar target/qr-payment-flow-0.0.1-SNAPSHOT.jar --app.mode=wallet
+```
+
+| Tiến trình | Cổng | H2 file | Chức năng |
+|---|---:|---|---|
+| Gateway | 8181 | `data/split/gateway.mv.db` | Giao dịch, Bank giả lập, IPN, refund và xuất báo cáo |
+| Merchant | 8182 | `data/split/merchant.mv.db` | Đơn hàng, nhận IPN, đồng bộ và đối soát |
+| Wallet | 8183 | `data/split/wallet.mv.db` | Người dùng, PIN, quét QR và xác nhận thanh toán |
+
+Ba tiến trình dùng chung JAR để dễ build. Mỗi tiến trình chỉ nạp controller, entity,
+repository và schema của mình. Merchant/Wallet gọi Gateway qua HTTP. Gateway gửi
+IPN qua `http://localhost:8182/api/merchant/ipn`. `QR_GATEWAY_BASE_URL` đổi địa chỉ
+Gateway cho Merchant/Wallet và `QR_MERCHANT_IPN_URL` chọn địa chỉ IPN khi seed `MC001`
+lần đầu trong database Gateway. Đổi cổng Merchant đã seed thì cập nhật IPN URL
+trong registry tương ứng.
+
+Để demo, đặt `@merchantUrl = http://localhost:8182` và `@walletUrl = http://localhost:8183`
+trong `requests/full-flow.http`. Dùng ngày thanh toán tại Việt Nam và UUID mới, rồi
+chạy B1–B8 theo thứ tự. Lệnh tải CSV gọi cổng Gateway `8181` và lệnh nhập CSV gọi
+cổng Merchant `8182`. Lệnh hoàn tiền gọi Gateway `8181` với `txnRef` từ lần demo mới.
+
+Khi cần dùng bản một tiến trình, chạy `java -jar target/qr-payment-flow-0.0.1-SNAPSHOT.jar`
+hoặc `mvnw spring-boot:run` như trước. Bản này dùng cổng `8080` và database H2
+`data/qr-payment.mv.db`. Chế độ ba ứng dụng dùng dữ liệu mẫu riêng trong `data/split`.
 
 ## Kiểm thử
 
@@ -756,9 +795,9 @@ Dependency ngoài ứng dụng: JDK 21, Maven Central lần tải đầu, projec
 đang chạy tại URL được chỉ định. Restart tests tự tạo process/port/H2 file trong target/.
 Không có parser thật thì full-suite thất bại; không dùng mock hoặc âm thầm skip.
 
-Kết quả thực tế ngày 2026-11-19 là **386 PASS, 0 FAIL, 0 errors, 0 skipped**.
-Bộ này gồm 377 test B1–B8 và 9 test đối soát CSV.
-`mvnw test` mặc định chọn 383 test nội bộ. Profile full-suite thêm ba lớp IT.
+Kết quả thực tế ngày 2026-11-19 là **393 PASS, 0 FAIL, 0 errors, 0 skipped**.
+Bộ này gồm 377 test B1–B8, 9 test CSV, 6 test hoàn tiền và 1 test chạy ba JVM độc lập.
+`mvnw test` mặc định chọn 389 test. Profile full-suite thêm bốn lớp IT.
 `qr-parser`
 gốc trả HTTP 200, `status=VALID`, CRC VALID cho
 QR thực sự sinh bởi Gateway với `type="04"`. JAR đóng gói thành công. Đủ 12 kịch bản
@@ -779,8 +818,8 @@ trong wrapper properties, rồi nạp vào cache cục bộ. Các lần test sau
 
 ## Phạm vi còn lại
 
-Phạm vi hiện tại gồm B1–B8, đối soát CSV và hoàn tiền. Tách ba ứng dụng là mục
-cộng điểm còn lại. PaymentCompleted phục vụ quan sát nội bộ. Outbox trong transaction B5
+Phạm vi hiện tại gồm B1–B8 và cả ba mục cộng điểm. PaymentCompleted phục vụ quan sát
+nội bộ. Outbox trong transaction B5
 giữ công việc gửi IPN qua các lần khởi động lại. Giới hạn
 lease B6, đọc hai snapshot khác thời điểm, dung lượng response và phạm vi H2 được
 ghi rõ trong [báo cáo B8](docs/phase8-report.md).

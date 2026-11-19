@@ -1,0 +1,13 @@
+spring:
+  application:
+    name: qr-gateway
+  datasource:
+    url: jdbc:h2:file:./data/split/gateway;DB_CLOSE_ON_EXIT=FALSE;WRITE_DELAY=0
+  sql:
+    init:
+      schema-locations: classpath:db/gateway.sql
+server:
+  port: 8181
+app:
+  gateway:
+    demo-ipn-url: ${QR_MERCHANT_IPN_URL:http://localhost:8182/api/merchant/ipn}
