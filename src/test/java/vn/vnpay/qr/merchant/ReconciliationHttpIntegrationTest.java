@@ -23,6 +23,7 @@ import org.springframework.test.context.*;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import vn.vnpay.qr.common.crypto.HmacSigner;
+import vn.vnpay.qr.common.reconciliation.ReconciliationCsv;
 import vn.vnpay.qr.gateway.ipn.IpnWorker;
 import vn.vnpay.qr.gateway.service.PaymentExpiryJob;
 import vn.vnpay.qr.merchant.client.GatewayPaymentClient;
@@ -122,6 +123,81 @@ class ReconciliationHttpIntegrationTest {
         assertThat(report.path("missingInMerchant").get(0).path("txnRef").asText()).isEqualTo(missingMerchant.txnRef());
         assertThat(report.path("missingInGateway").get(0).path("txnRef").asText()).isEqualTo(missingGateway.txnRef());
         assertThat(report.path("amountMismatch").get(0).path("txnRef").asText()).isEqualTo(mismatch.txnRef());assertThat(snapshot()).isEqualTo(before);
+    }
+
+    @Test void csvReconciliationMatchesJsonReportAndWorksWithoutCallingGateway() throws Exception {
+        var matched = start(55000);
+        pay(matched, "U001");
+        worker.runOnce();
+        var mismatch = start(55000);
+        pay(mismatch, "U001");
+        worker.runOnce();
+        jdbc.update("UPDATE orders SET amount=56000 WHERE order_id=?", mismatch.orderId());
+        markLocalPaid(start(55000));
+        var missingMerchant = start(55000);
+        pay(missingMerchant, "U001");
+
+        String before = snapshot();
+        var expected = reconcile(DATE, 200);
+        assertReport(expected, 1, 1, 1, 1, 165000, 166000);
+        var exported = downloadCsv("MC001", DATE, "MC001", signature("MC001", DATE));
+        assertThat(exported.statusCode()).isEqualTo(200);
+        assertThat(exported.headers().firstValue("Content-Type").orElseThrow()).startsWith("text/csv");
+        assertThat(exported.headers().firstValue("Content-Disposition").orElseThrow()).contains("reconciliation-" + DATE + ".csv");
+        assertThat(exported.headers().firstValue("Cache-Control").orElseThrow()).isEqualTo("no-store");
+
+        mode = "500";
+        int calls = reconciliationCalls.get();
+        assertThat(importCsv(DATE, exported.body(), 200)).isEqualTo(expected);
+        assertThat(importCsv(DATE, exported.body(), 200)).isEqualTo(expected);
+        assertThat(reconciliationCalls.get()).isEqualTo(calls);
+        assertThat(snapshot()).isEqualTo(before);
+        invariants(1010000);
+    }
+
+    @Test void csvEmptySnapshotStillCarriesVerifiedMerchantAndDate() throws Exception {
+        byte[] file = downloadCsv("MC001", DATE, "MC001", signature("MC001", DATE)).body();
+        assertReport(importCsv(DATE, file, 200), 0, 0, 0, 0, 0, 0);
+        assertThat(importCsv("2026-11-14", file, 400).path("errorCode").asText()).isEqualTo("INVALID_CSV");
+    }
+
+    @Test void csvDownloadRejectsWrongSignatureAndCrossMerchantRequests() throws Exception {
+        assertThat(downloadCsv("MC001", DATE, "MC001", "wrong").statusCode()).isEqualTo(401);
+        assertThat(downloadCsv("MC002", DATE, "MC001", signature("MC002", DATE)).statusCode()).isEqualTo(401);
+    }
+
+    @Test void csvImportRejectsAnotherMerchantEvenWhenTheSigningKeyMatches() throws Exception {
+        jdbc.update("INSERT INTO merchant(merchant_id,name,city,mcc,secret_key,ipn_url,account_no) VALUES ('MC002','OTHER','HANOI','5499','secret-mc001','http://localhost/ipn','9000001')");
+        var response = downloadCsv("MC002", DATE, "MC002", signature("MC002", DATE));
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(importCsv(DATE, response.body(), 400).path("errorCode").asText()).isEqualTo("INVALID_CSV");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"edited-amount", "missing-payment", "duplicated-payment", "invalid-header"})
+    void csvImportRejectsTamperedOrMalformedFilesWithoutWritingData(String change) throws Exception {
+        var payment = start(55000);
+        pay(payment, "U001");
+        worker.runOnce();
+        byte[] file = downloadCsv("MC001", DATE, "MC001", signature("MC001", DATE)).body();
+        var lines = new String(file, StandardCharsets.UTF_8).lines().toList();
+        assertThat(lines).hasSize(3);
+        String changed = switch (change) {
+            // Change both values so totals still match. The signature must reject this, even when the snapshot is otherwise valid.
+            case "edited-amount" -> String.join("\n", lines.get(0), lines.get(1).replace(",55000,", ",56000,"),
+                    lines.get(2).replace(",55000,", ",56000,"));
+            case "missing-payment" -> String.join("\n", lines.get(0), lines.get(1));
+            case "duplicated-payment" -> String.join("\n", lines.get(0), lines.get(1), lines.get(2), lines.get(2));
+            default -> String.join("\n", "invalid header", lines.get(1), lines.get(2));
+        };
+        String before = snapshot();
+        assertThat(importCsv(DATE, changed.getBytes(StandardCharsets.UTF_8), 400).path("errorCode").asText()).isEqualTo("INVALID_CSV");
+        assertThat(snapshot()).isEqualTo(before);
+    }
+
+    @Test void csvImportRejectsOversizedBodies() throws Exception {
+        byte[] oversized = new byte[ReconciliationCsv.MAX_BYTES + 1];
+        assertThat(importCsv(DATE, oversized, 413).path("errorCode").asText()).isEqualTo("CSV_TOO_LARGE");
     }
     @Test void emptyDayReturnsAllSevenFieldsAndZeroTotals() throws Exception {assertReport(reconcile(DATE,200),0,0,0,0,0,0);}
     @Test void manyTransactionsInTheSameDayAreAllCountedOnce() throws Exception {
@@ -240,6 +316,20 @@ class ReconciliationHttpIntegrationTest {
     HttpResponse<String> gatewayGet(String merchant,String date,String headerId,String signature) throws Exception {
         return HTTP.send(HttpRequest.newBuilder(URI.create(base()+"/api/gateway/reconciliation?merchantId="+merchant+"&date="+date))
                 .header("X-Merchant-Id",headerId).header("X-Signature",signature).GET().build(),HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<byte[]> downloadCsv(String merchant, String date, String headerId, String signature) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create(base() + "/api/gateway/reconciliation/csv?merchantId=" + merchant + "&date=" + date))
+                .header("X-Merchant-Id", headerId).header("X-Signature", signature).GET().build();
+        return HTTP.send(request, HttpResponse.BodyHandlers.ofByteArray());
+    }
+
+    private JsonNode importCsv(String date, byte[] file, int expected) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create(base() + "/api/merchant/reconcile/csv?date=" + date))
+                .header("Content-Type", "text/csv").POST(HttpRequest.BodyPublishers.ofByteArray(file)).build();
+        var response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).as("CSV import: %s", response.body()).isEqualTo(expected);
+        return mapper.readTree(response.body());
     }
     String signature(String merchant,String date){return hmac.sign(mapper.createObjectNode().put("merchantId",merchant).put("date",date),"secret-mc001");}
     String orderState(Payment payment){return jdbc.queryForObject("SELECT status FROM orders WHERE order_id=?",String.class,payment.orderId());}

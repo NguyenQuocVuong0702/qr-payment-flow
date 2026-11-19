@@ -2,8 +2,8 @@
 
 Tài liệu gốc: [bai-tap-luong-thanh-toan-qr.md](../bai-tap-luong-thanh-toan-qr.md).
 Khi có khác biệt, quy tắc nghiệp vụ, API, mã lỗi và kiểm thử trong đề được ưu tiên.
-Tài liệu này phân tích B1–B8; code hiện tại thực hiện đủ tám bước, gồm đối soát chỉ
-đọc. Không triển khai refund hoặc phần mở rộng ngoài đề.
+Code hiện tại thực hiện đủ tám bước B1–B8 và bổ sung đối soát qua file CSV. Cả hai
+cách đối soát đều chỉ đọc dữ liệu.
 Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md) và
 [báo cáo B3](phase3-report.md), [B4](phase4-report.md), [B5](phase5-report.md)
 và [B6](phase6-report.md), [B7](phase7-report.md), [B8](phase8-report.md).
@@ -519,3 +519,16 @@ sequenceDiagram
   Type04 thất bại, không skip hoặc thay bằng parser tự viết.
 
 Các kết quả cụ thể và bảng 12 kịch bản nằm trong [báo cáo B8](phase8-report.md).
+
+Phần cộng điểm dùng CSV để chuyển cùng một ảnh chụp giao dịch B8 qua file.
+Gateway xác thực yêu cầu tải bằng HMAC của `date` và `merchantId`, rồi xuất UTF-8
+với một dòng `SUMMARY` và các dòng `PAYMENT` theo `txnRef`. Ngày trống vẫn có dòng
+`SUMMARY` để xác thực cửa hàng, ngày và tổng bằng 0. Chữ ký ở dòng này xác thực
+dữ liệu báo cáo được dựng lại theo quy tắc HMAC B8, gồm toàn bộ giao dịch theo thứ tự.
+
+Merchant nhận file nguyên bản trong request `text/csv`. Bộ đọc kiểm tra định dạng
+cột cố định và chữ ký trước khi dùng validator B8 để kiểm tra tổng, ngày, cửa hàng
+và giao dịch trùng. Sau đó Merchant dùng chung thuật toán đối chiếu với đơn `PAID`.
+Luồng nhập chỉ đọc dữ liệu cục bộ nên dùng được trong thời gian Gateway gián đoạn.
+File tối đa 4 MiB. Giới hạn về thời điểm lấy dữ liệu hai bên vẫn áp dụng, đặc biệt
+khi file tải xuống đã cũ.

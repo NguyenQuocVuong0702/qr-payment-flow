@@ -2,7 +2,7 @@
 
 Ứng dụng bài tập Java 21, Spring Boot 3.5.16, Maven 3.9.16, H2.
 Đã triển khai **B1–B8**: tạo đơn, QR động, scan, PIN, chuyển tiền giả lập, IPN bền
-vững, tra cứu/đồng bộ, hết hạn và đối soát cuối ngày. Dừng tại B8, không có hoàn tiền.
+vững, tra cứu/đồng bộ, hết hạn và đối soát cuối ngày. Phần cộng điểm bổ sung đối soát qua CSV.
 
 - [Đề bài chính thức](bai-tap-luong-thanh-toan-qr.md)
 - [Phân tích B1–B8, mô hình dữ liệu, transaction và các quyết định](docs/architecture.md)
@@ -638,6 +638,46 @@ flowchart LR
     L --> R[B8 xác thực danh sách và đối soát chỉ đọc]
 ```
 
+## Cộng điểm — đối soát qua CSV
+
+Gateway xuất danh sách giao dịch thành công thành file CSV có chữ ký.
+Merchant nhận file và đối soát với các đơn `PAID` đã lưu. Kết quả có cùng bảy trường
+như B8. Có thể nhập file đã tải khi Gateway tạm ngừng hoạt động.
+
+| Thao tác | Request |
+|---|---|
+| Tải CSV đã ký | `GET /api/gateway/reconciliation/csv?merchantId=MC001&date=2026-11-19` cùng `X-Merchant-Id` và `X-Signature` như B8 |
+| Nhập CSV và xem báo cáo | `POST /api/merchant/reconcile/csv?date=2026-11-19` với `Content-Type: text/csv` và nguyên file trong body |
+
+Chạy demo B1–B7 trước để có giao dịch `PAID`. Mở PowerShell và đặt `$qrDate` theo ngày
+`paidAt` tại Việt Nam. Ví dụ dưới đây dùng khóa của cửa hàng mẫu `MC001`.
+
+```powershell
+$qrDate = '2026-11-19'
+$qrMerchant = 'MC001'
+$qrFile = Join-Path ([IO.Path]::GetTempPath()) "qr-payment-$qrDate.csv"
+$qrHmac = [System.Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes('secret-mc001'))
+try {
+    $qrHash = $qrHmac.ComputeHash([Text.Encoding]::UTF8.GetBytes("date=$qrDate&merchantId=$qrMerchant"))
+    $qrSignature = [BitConverter]::ToString($qrHash).Replace('-', '').ToLowerInvariant()
+} finally {
+    $qrHmac.Dispose()
+}
+
+curl.exe --fail-with-body -sS `
+    -H "X-Merchant-Id: $qrMerchant" -H "X-Signature: $qrSignature" `
+    -o $qrFile "http://localhost:8080/api/gateway/reconciliation/csv?merchantId=$qrMerchant&date=$qrDate"
+if ($LASTEXITCODE -ne 0) { throw 'Tai CSV that bai' }
+
+curl.exe --fail-with-body -sS -H "Content-Type: text/csv" `
+    --data-binary "@$qrFile" "http://localhost:8080/api/merchant/reconcile/csv?date=$qrDate"
+```
+
+File UTF-8 có dòng `SUMMARY` ghi mã cửa hàng, ngày, tổng và chữ ký. Mỗi giao dịch
+thành công có một dòng `PAYMENT`. Gửi nguyên file xuất từ Gateway. Merchant từ chối
+file sai chữ ký, sai ngày, sai cửa hàng hoặc sai cấu trúc với `400 INVALID_CSV`.
+Giới hạn mỗi file là 4 MiB. Báo cáo chỉ đọc dữ liệu và có thể chạy lại với cùng file.
+
 ## Kiểm thử
 
 ```powershell
@@ -672,9 +712,9 @@ Dependency ngoài ứng dụng: JDK 21, Maven Central lần tải đầu, projec
 đang chạy tại URL được chỉ định. Restart tests tự tạo process/port/H2 file trong target/.
 Không có parser thật thì full-suite thất bại; không dùng mock hoặc âm thầm skip.
 
-Kết quả thực tế ngày 2026-11-13: **377 PASS, 0 FAIL, 0 errors, 0 skipped**, gồm
-291 test B1–B7 và 86 test B8 mới (82 HTTP tích hợp, bốn HMAC/ngày Việt Nam).
-`mvnw test` mặc định chọn 374 test nội bộ; profile full-suite thêm ba lớp IT.
+Kết quả thực tế ngày 2026-11-19 là **386 PASS, 0 FAIL, 0 errors, 0 skipped**.
+Bộ này gồm 377 test B1–B8 và 9 test đối soát CSV.
+`mvnw test` mặc định chọn 383 test nội bộ. Profile full-suite thêm ba lớp IT.
 `qr-parser`
 gốc trả HTTP 200, `status=VALID`, CRC VALID cho
 QR thực sự sinh bởi Gateway với `type="04"`. JAR đóng gói thành công. Đủ 12 kịch bản
@@ -695,7 +735,8 @@ trong wrapper properties, rồi nạp vào cache cục bộ. Các lần test sau
 
 ## Phạm vi còn lại
 
-Dừng sau B8, không có refund hoặc phần mở rộng khác. PaymentCompleted chỉ phục vụ
-quan sát nội bộ; tính bền vững IPN dựa trên outbox trong transaction B5. Giới hạn
+Phạm vi hiện tại gồm B1–B8 và đối soát CSV. Hoàn tiền và tách ba ứng dụng là các mục
+cộng điểm còn lại. PaymentCompleted phục vụ quan sát nội bộ. Outbox trong transaction B5
+giữ công việc gửi IPN qua các lần khởi động lại. Giới hạn
 lease B6, đọc hai snapshot khác thời điểm, dung lượng response và phạm vi H2 được
 ghi rõ trong [báo cáo B8](docs/phase8-report.md).
