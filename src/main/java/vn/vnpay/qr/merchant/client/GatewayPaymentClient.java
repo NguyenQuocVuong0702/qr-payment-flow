@@ -112,10 +112,10 @@ public class GatewayPaymentClient {
                     });
             if (result == null || !order.txnRef().equals(result.txnRef()) || !order.orderId().equals(result.orderId())
                     || result.amount() == null || result.amount() != order.amount() || result.createdAt() == null
-                    || result.status() == null || !Set.of("PENDING", "PROCESSING", "SUCCESS", "FAILED", "EXPIRED").contains(result.status())) {
+                    || result.status() == null || !Set.of("PENDING", "PROCESSING", "SUCCESS", "FAILED", "EXPIRED", "REFUNDED").contains(result.status())) {
                 throw invalidResponse();
             }
-            if ("SUCCESS".equals(result.status())) {
+            if ("SUCCESS".equals(result.status()) || "REFUNDED".equals(result.status())) {
                 if (result.bankRef() == null || result.bankRef().isBlank() || result.bankRef().length() > 32
                         || result.paidAt() == null || result.paidAt().isBefore(result.createdAt())) throw invalidResponse();
             } else if (result.bankRef() != null || result.paidAt() != null) throw invalidResponse();

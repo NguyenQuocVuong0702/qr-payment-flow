@@ -33,7 +33,7 @@ public class MerchantOrderLookupStore {
         }
         if (order.getStatus() == OrderStatus.WAITING_PAYMENT) {
             switch (payment.status()) {
-                case "SUCCESS" -> order.confirmPayment(true, payment.paidAt().toInstant());
+                case "SUCCESS", "REFUNDED" -> order.confirmPayment(true, payment.paidAt().toInstant());
                 case "FAILED" -> order.confirmPayment(false, null);
                 case "EXPIRED" -> order.expire();
                 default -> { /* PENDING/PROCESSING never infer a terminal state from local time. */ }

@@ -5,8 +5,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import vn.vnpay.qr.gateway.domain.PaymentTxn;
 
 public interface PaymentTxnRepository extends JpaRepository<PaymentTxn, String> {
-    @org.springframework.data.jpa.repository.Query("select p from PaymentTxn p where p.merchantId=:merchantId and p.status=vn.vnpay.qr.gateway.domain.PaymentStatus.SUCCESS and p.paidAt>=:start and p.paidAt<:end order by p.txnRef")
-    java.util.List<PaymentTxn> findSuccessForDay(@org.springframework.data.repository.query.Param("merchantId") String merchantId,
+    @org.springframework.data.jpa.repository.Query("select p from PaymentTxn p where p.merchantId=:merchantId and p.status in (vn.vnpay.qr.gateway.domain.PaymentStatus.SUCCESS, vn.vnpay.qr.gateway.domain.PaymentStatus.REFUNDED) and p.paidAt>=:start and p.paidAt<:end order by p.txnRef")
+    java.util.List<PaymentTxn> findCapturedForDay(@org.springframework.data.repository.query.Param("merchantId") String merchantId,
             @org.springframework.data.repository.query.Param("start") java.time.Instant start,
             @org.springframework.data.repository.query.Param("end") java.time.Instant end);
     @org.springframework.data.jpa.repository.Query("select p.txnRef from PaymentTxn p where p.status=vn.vnpay.qr.gateway.domain.PaymentStatus.PENDING and p.expireAt<=:now order by p.txnRef")

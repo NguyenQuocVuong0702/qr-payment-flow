@@ -2,7 +2,8 @@
 
 Ứng dụng bài tập Java 21, Spring Boot 3.5.16, Maven 3.9.16, H2.
 Đã triển khai **B1–B8**: tạo đơn, QR động, scan, PIN, chuyển tiền giả lập, IPN bền
-vững, tra cứu/đồng bộ, hết hạn và đối soát cuối ngày. Phần cộng điểm bổ sung đối soát qua CSV.
+vững, tra cứu/đồng bộ, hết hạn và đối soát cuối ngày. Phần cộng điểm bổ sung đối soát CSV
+và hoàn tiền toàn phần hoặc một phần.
 
 - [Đề bài chính thức](bai-tap-luong-thanh-toan-qr.md)
 - [Phân tích B1–B8, mô hình dữ liệu, transaction và các quyết định](docs/architecture.md)
@@ -678,6 +679,49 @@ thành công có một dòng `PAYMENT`. Gửi nguyên file xuất từ Gateway. 
 file sai chữ ký, sai ngày, sai cửa hàng hoặc sai cấu trúc với `400 INVALID_CSV`.
 Giới hạn mỗi file là 4 MiB. Báo cáo chỉ đọc dữ liệu và có thể chạy lại với cùng file.
 
+## Cộng điểm — hoàn tiền
+
+Sau khi khách trả 55.000đ, cửa hàng có thể hoàn 20.000đ rồi hoàn tiếp 35.000đ.
+Gateway chuyển ngược tiền giữa hai tài khoản của giao dịch gốc và ghi sổ riêng cho
+mỗi lần hoàn. `PARTIALLY_REFUNDED` trong kết quả nghĩa là vẫn còn tiền có thể hoàn.
+Khi hoàn hết, trạng thái Gateway là `REFUNDED`. Tổng hoàn tối đa bằng số tiền đã thu.
+
+`POST /api/gateway/payments/{txnRef}/refund` nhận JSON `amount` (số nguyên VND dương)
+và `requestId` (UUID). Dùng `X-Merchant-Id` và `X-Signature` HMAC-SHA256 cho chuỗi
+`action=refund&amount=<amount>&merchantId=<id>&requestId=<uuid>&txnRef=<ref>`.
+Cửa hàng phải sở hữu giao dịch. Thành công trả HTTP 200 và `X-Signature` cùng các trường
+`txnRef`, `refundRef`, `requestId`, `amount`, `totalRefunded`, `remainingAmount`, `status`,
+`refundedAt`. Gửi lại cùng `txnRef`, `requestId` và `amount` trả kết quả của lần đó.
+Đổi số tiền với cùng UUID trả `409 IDEMPOTENCY_CONFLICT`, còn vượt số tiền có thể hoàn
+trả `422 REFUND_AMOUNT_EXCEEDED`. Tài khoản cửa hàng thiếu tiền thì trả
+`422 INSUFFICIENT_FUNDS` và có thể gửi lại sau khi có đủ số dư.
+
+Demo bằng PowerShell sau khi đã tạo một giao dịch mẫu thành công 55.000đ:
+
+```powershell
+function Invoke-QrRefund($qrRef, $qrAmount, $qrRequestId) {
+    $qrData = "action=refund&amount=$qrAmount&merchantId=MC001&requestId=$qrRequestId&txnRef=$qrRef"
+    $qrHmac = [Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes('secret-mc001'))
+    try {
+        $qrSignature = [BitConverter]::ToString($qrHmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($qrData))).Replace('-', '').ToLowerInvariant()
+    } finally { $qrHmac.Dispose() }
+    Invoke-RestMethod -Method Post -Uri "http://localhost:8080/api/gateway/payments/$qrRef/refund" `
+      -ContentType 'application/json' -Headers @{'X-Merchant-Id'='MC001'; 'X-Signature'=$qrSignature} `
+      -Body (@{amount=$qrAmount; requestId=$qrRequestId} | ConvertTo-Json -Compress)
+}
+
+$qrRef = 'TX00000002' # Thay bằng txnRef vừa thanh toán nếu dùng giao dịch khác.
+$qrPartialId = [guid]::NewGuid().ToString()
+Invoke-QrRefund $qrRef 20000 $qrPartialId
+Invoke-QrRefund $qrRef 20000 $qrPartialId # Gửi lại, cùng refundRef.
+Invoke-QrRefund $qrRef 35000 ([guid]::NewGuid().ToString())
+```
+
+B8 và CSV đối soát **số tiền thu ban đầu** theo ngày `paidAt`, kể cả giao dịch đã
+hoàn hết. Merchant giữ `PAID` để ghi nhận lần thu ban đầu. Hoàn tiền có lịch sử riêng
+trong `refund_txn` / `refund_ledger_entry`. Báo cáo doanh thu ròng sẽ cần trừ phần hoàn
+theo quy tắc kế toán của hệ thống sử dụng báo cáo.
+
 ## Kiểm thử
 
 ```powershell
@@ -735,7 +779,7 @@ trong wrapper properties, rồi nạp vào cache cục bộ. Các lần test sau
 
 ## Phạm vi còn lại
 
-Phạm vi hiện tại gồm B1–B8 và đối soát CSV. Hoàn tiền và tách ba ứng dụng là các mục
+Phạm vi hiện tại gồm B1–B8, đối soát CSV và hoàn tiền. Tách ba ứng dụng là mục
 cộng điểm còn lại. PaymentCompleted phục vụ quan sát nội bộ. Outbox trong transaction B5
 giữ công việc gửi IPN qua các lần khởi động lại. Giới hạn
 lease B6, đọc hai snapshot khác thời điểm, dung lượng response và phạm vi H2 được

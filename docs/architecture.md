@@ -2,7 +2,7 @@
 
 Tài liệu gốc: [bai-tap-luong-thanh-toan-qr.md](../bai-tap-luong-thanh-toan-qr.md).
 Khi có khác biệt, quy tắc nghiệp vụ, API, mã lỗi và kiểm thử trong đề được ưu tiên.
-Code hiện tại thực hiện đủ tám bước B1–B8 và bổ sung đối soát qua file CSV. Cả hai
+Code hiện tại thực hiện đủ tám bước B1–B8 và bổ sung đối soát qua CSV cùng hoàn tiền. Cả hai
 cách đối soát đều chỉ đọc dữ liệu.
 Kết quả thực tế và giới hạn kiểm chứng nằm ở [báo cáo B2](phase2-report.md) và
 [báo cáo B3](phase3-report.md), [B4](phase4-report.md), [B5](phase5-report.md)
@@ -532,3 +532,20 @@ và giao dịch trùng. Sau đó Merchant dùng chung thuật toán đối chi�
 Luồng nhập chỉ đọc dữ liệu cục bộ nên dùng được trong thời gian Gateway gián đoạn.
 File tối đa 4 MiB. Giới hạn về thời điểm lấy dữ liệu hai bên vẫn áp dụng, đặc biệt
 khi file tải xuống đã cũ.
+
+## Hoàn tiền
+
+Gateway xác thực HMAC riêng cho thao tác `refund` và kiểm chủ sở hữu. Transaction
+khóa dòng thanh toán theo `txnRef`. Trong cùng khóa, tra idempotency refund theo
+`(txnRef, requestId)`, tính tổng đã hoàn, rồi khóa hai tài khoản theo thứ tự giống B5.
+Tài khoản bị trừ lấy từ bút toán CREDIT gốc. Tài khoản được cộng là người đã trả.
+Các thay đổi số dư, `refund_txn`, hai dòng `refund_ledger_entry` và trạng thái cùng
+commit hoặc cùng rollback. Khi hết số tiền có thể hoàn, Gateway chuyển
+`SUCCESS` → `REFUNDED`. Hoàn một phần giữ `SUCCESS` trong bảng thanh toán.
+
+Hai bảng mới dùng khóa duy nhất theo yêu cầu và cặp bút toán. B5 giữ ledger và
+`bankRef` ban đầu. Kết quả mỗi lần hoàn lưu số còn lại tại thời điểm đó để replay
+vẫn trả đúng khi có lần hoàn khác sau đó. Refund được báo trực tiếp qua response.
+B6 tiếp tục giao IPN cho lần thu gốc. B7 có thể xác minh lần thu đã thành công từ
+trạng thái `REFUNDED` nếu đơn bỏ lỡ IPN. B8 và CSV đối soát số tiền thu ban đầu
+theo `paidAt`, còn số tiền hoàn tra từ lịch sử refund.

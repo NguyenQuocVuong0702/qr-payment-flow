@@ -14,9 +14,10 @@ public class GatewayReconciliationService {
     public GatewayReconciliationService(PaymentTxnRepository payments) { this.payments = payments; }
     @Transactional(readOnly = true)
     public ReconciliationResponse get(String merchantId, BusinessDay day) {
-        var transactions = payments.findSuccessForDay(merchantId, day.start(), day.end()).stream()
+        // B8 compares original collections on paidAt. Refunds are separate money movements.
+        var transactions = payments.findCapturedForDay(merchantId, day.start(), day.end()).stream()
                 .map(txn -> new ReconciliationResponse.Transaction(txn.getTxnRef(), txn.getOrderId(), txn.getAmount(),
-                        txn.getStatus().name(), txn.getBankRef(), OffsetDateTime.ofInstant(txn.getPaidAt(), BUSINESS_ZONE))).toList();
+                        "SUCCESS", txn.getBankRef(), OffsetDateTime.ofInstant(txn.getPaidAt(), BUSINESS_ZONE))).toList();
         long total = 0;
         for (var txn : transactions) total = Math.addExact(total, txn.amount());
         return new ReconciliationResponse(merchantId, day.date().toString(), transactions.size(), total, transactions);

@@ -17,6 +17,20 @@ public class BankTransferService {
     }
     @Transactional(propagation = Propagation.MANDATORY)
     public BankTransferResult transfer(String txnRef, String payer, String payee, long amount, Instant now) {
+        var result = moveFunds(payer, payee, amount, now);
+        if (result.errorCode() != null) return result;
+        ledger.saveAndFlush(new LedgerEntry(txnRef, result.bankRef(), payer, "DEBIT", amount, now));
+        ledger.saveAndFlush(new LedgerEntry(txnRef, result.bankRef(), payee, "CREDIT", amount, now));
+        return result;
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public BankTransferResult reverse(String merchantAccount, String customerAccount, long amount, Instant now) {
+        // The caller persists the refund and its separate ledger in this same transaction.
+        return moveFunds(merchantAccount, customerAccount, amount, now);
+    }
+
+    private BankTransferResult moveFunds(String payer, String payee, long amount, Instant now) {
         if (payer.equals(payee)) throw new IllegalStateException("Self transfer must be rejected before processing");
         // Explicit PK lookups in the same stable order for every transfer avoid account lock inversion.
         var locked = new HashMap<String, Account>();
@@ -35,8 +49,6 @@ public class BankTransferService {
         accounts.flush(); // Flush is not commit; failures at any later stage still roll back this debit.
         target.credit(amount);
         accounts.flush();
-        ledger.saveAndFlush(new LedgerEntry(txnRef, bankRef, payer, "DEBIT", amount, now));
-        ledger.saveAndFlush(new LedgerEntry(txnRef, bankRef, payee, "CREDIT", amount, now));
         return new BankTransferResult(bankRef, null);
     }
 }
