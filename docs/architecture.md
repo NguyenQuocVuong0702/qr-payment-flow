@@ -139,7 +139,7 @@ toàn payload bao gồm 6304 rồi append bốn ký tự hex. CRC chỉ phát hi
 xác thực người tạo. B3 parse xong phải hỏi Gateway và so amount thật trước khi trả
 thông tin cho khách. Đã tìm thấy project gốc ở `../qr-parser/qr-parser`, sao chép
 pom và main source không chỉnh sửa vào `.build/` để build trong vùng được ghi.
-`QrParserCompatibilityIT` đã gọi API project gốc với QR sinh từ Gateway, type 04:
+`QrParserCompatibilityTest` gọi API project gốc với QR sinh từ Gateway, type 04:
 HTTP 200, status VALID, CRC VALID. Không dùng parser tự viết để xác nhận tương thích.
 
 **PIN:** Wallet dùng BCrypt, không đưa PIN sang Gateway; khóa user khi cập nhật số lần
@@ -515,9 +515,9 @@ sequenceDiagram
   thể tạo lệch tạm thời, cần chạy lại sau khi ổn định. Không tạo distributed transaction.
 - DDL B8 chỉ thêm hai index, không đổi bảng hoặc dữ liệu tài chính. Không lưu bảng
   reconciliation_run, không thêm scheduler cuối ngày, broker, refund hoặc tự sửa dữ liệu.
-- Maven profile full-suite chọn cả *Test và *IT; mvnw -Pfull-suite -Dqr.parser.url=...
-  verify chạy test, Type04 gốc, restart B5/B6 và đóng gói. Thiếu parser thật thì test
-  Type04 thất bại, không skip hoặc thay bằng parser tự viết.
+- `mvnw test` bao gồm Type 04 và tự chạy JAR của parser gốc trên cổng cục bộ.
+  `mvnw -Pfull-suite verify` thêm các lớp IT cho restart B5/B6, ba tiến trình và
+  đóng gói JAR. Nếu thiếu parser gốc, bài test Type 04 báo cách cung cấp JAR hoặc URL.
 
 Các kết quả cụ thể và bảng 12 kịch bản nằm trong [báo cáo B8](phase8-report.md).
 

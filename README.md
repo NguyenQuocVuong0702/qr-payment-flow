@@ -21,6 +21,7 @@ vững, tra cứu/đồng bộ, hết hạn và đối soát cuối ngày. Đã 
 - [Báo cáo B7: tra cứu, hết hạn và audit](docs/phase7-report.md)
 - [Request B7](requests/b7.http)
 - [Báo cáo B8 và trạng thái 12 kịch bản bắt buộc](docs/phase8-report.md)
+- [Giải thích ngắn năm câu hỏi của đề](docs/phase8-report.md#giải-thích-ngắn-năm-câu-hỏi-của-đề)
 - [Request B8](requests/b8.http), [demo HTTP toàn luồng B1–B8](requests/full-flow.http)
 
 ## Cấu trúc
@@ -71,7 +72,7 @@ src/test/java/vn/vnpay/qr/
   merchant/MerchantPaymentHttpIntegrationTest.java
   gateway/CryptoAndQrTest.java
   gateway/GatewayPaymentApiIntegrationTest.java
-  gateway/QrParserCompatibilityIT.java Kiểm tra ngoài qua API qr-parser gốc
+  gateway/QrParserCompatibilityTest.java Kiểm tra Type 04 qua API qr-parser gốc
   gateway/ConfirmationIntegrationTest.java Money, concurrency, fault injection
   gateway/RestartPersistenceIT.java    Hai process thật, HTTP và H2 file qua restart
   gateway/IpnIntegrationTest.java      HMAC, HTTP, retry, concurrency và fault injection
@@ -623,20 +624,50 @@ schema và ví dụ các loại lệch trong [báo cáo B8](docs/phase8-report.m
 ## Demo B1–B8
 
 Mở [requests/full-flow.http](requests/full-flow.http) bằng VS Code REST Client,
-chạy tuần tự từng request có tên. File tự nối orderId, txnRef, QR từ response trước.
-Đặt date theo ngày thanh toán Việt Nam; đổi requestId cho một lần mua mới và giữ
-nguyên nếu retry. B6 chạy nền, chờ khoảng một giây rồi GET đơn; B7 sync là thao tác
-riêng khi mất IPN. Báo cáo tính tất cả giao dịch cùng ngày, nên matched có thể lớn
-hơn 1 nếu DB đã có các lần demo trước. Các request từng bước vẫn nằm trong requests/.
+chạy tuần tự từ `createOrder` đến `reconcile`. File lấy `orderId`, `txnRef` và QR
+từ các phản hồi trước. File tạo một UUID khi gửi `createOrder` và lưu trong header
+demo để `pay` và `retryPayment` dùng cùng mã yêu cầu.
+
+B6 chạy nền. Chờ khoảng một giây rồi gọi `orderAfterIpn` để đọc trạng thái đơn.
+B7 `syncOrder` dùng khi cần đồng bộ. `@date` mặc định là ngày hiện tại ở Việt Nam.
+Khi đối soát giao dịch từ ngày trước, điền ngày trong `paidAt`. Báo cáo tính tất
+cả các giao dịch của ngày đó, nên `matched` có thể lớn hơn 1 khi đã demo nhiều lần.
+
+### Sơ đồ luồng B1–B8
+
+[Bản vẽ ban đầu](docs/payment-flow-original.png)
 
 ```mermaid
-flowchart LR
-    O[B1 tạo đơn] --> Q[B2 QR động]
-    Q --> S[B3 Wallet scan + Gateway lookup]
-    S --> P[B4 PIN + B5 chuyển tiền]
-    P --> I[B6 outbox và IPN]
-    I --> L[B7 xem/sync đơn]
-    L --> R[B8 xác thực danh sách và đối soát chỉ đọc]
+flowchart TD
+    O["B1 · Merchant tạo đơn 55.000đ<br/>Đơn CREATED"]
+    Q["B2 · Gateway tạo QR và giao dịch PENDING<br/>Đơn WAITING_PAYMENT"]
+    S["B3 · Wallet quét QR, kiểm CRC<br/>Tra cứu Gateway và đối chiếu số tiền"]
+    P["B4 · Khách nhập PIN<br/>Wallet xác thực và gửi yêu cầu"]
+    T["B5 · Gateway xử lý yêu cầu<br/>Bank giả lập chuyển tiền và ghi sổ"]
+    O --> Q --> S --> P --> T
+    T -->|Đã thu tiền| OK["Giao dịch SUCCESS"]
+    T -->|Bank từ chối| KO["Giao dịch FAILED"]
+
+    N["B6 · Gateway gửi IPN sau commit<br/>Merchant kiểm HMAC, mã giao dịch và số tiền"]
+    OK --> N
+    KO --> N
+    N -->|IPN SUCCESS hợp lệ| PAID["Merchant ghi PAID"]
+    N -->|IPN FAILED hợp lệ| FAILED["Merchant ghi PAYMENT_FAILED"]
+    N -->|Lỗi giao nhận| RETRY["Tối đa 3 lần gửi, kể cả lần đầu"]
+    RETRY -->|Còn lượt| N
+
+    L["B7 · Merchant tra cứu Gateway theo txnRef"]
+    Q -. Đơn đang chờ, tra cứu khi cần .-> L
+    RETRY -. Hết lượt, đơn vẫn chờ .-> L
+    L -->|SUCCESS hoặc REFUNDED| PAID
+    L -->|FAILED| FAILED
+    L -->|PENDING hoặc PROCESSING| WAIT["Đơn vẫn WAITING_PAYMENT"]
+    L -->|EXPIRED| EXP["Merchant ghi EXPIRED"]
+
+    subgraph DAILY["Đối soát theo ngày"]
+        R["B8 · Merchant đối chiếu đơn đã thu tiền<br/>với danh sách Gateway"]
+        R --> REPORT["Báo cáo số khớp, tổng tiền<br/>và ba nhóm chênh lệch"]
+    end
 ```
 
 ## Cộng điểm — đối soát qua CSV
@@ -753,8 +784,8 @@ lần đầu trong database Gateway. Đổi cổng Merchant đã seed thì cập
 trong registry tương ứng.
 
 Để demo, đặt `@merchantUrl = http://localhost:8182` và `@walletUrl = http://localhost:8183`
-trong `requests/full-flow.http`. Dùng ngày thanh toán tại Việt Nam và UUID mới, rồi
-chạy B1–B8 theo thứ tự. Lệnh tải CSV gọi cổng Gateway `8181` và lệnh nhập CSV gọi
+trong `requests/full-flow.http` rồi chạy B1–B8 theo thứ tự. Lệnh tải CSV gọi cổng
+Gateway `8181` và lệnh nhập CSV gọi
 cổng Merchant `8182`. Lệnh hoàn tiền gọi Gateway `8181` với `txnRef` từ lần demo mới.
 
 Khi cần dùng bản một tiến trình, chạy `java -jar target/qr-payment-flow-0.0.1-SNAPSHOT.jar`
@@ -763,58 +794,41 @@ hoặc `mvnw spring-boot:run` như trước. Bản này dùng cổng `8080` và 
 
 ## Kiểm thử
 
+**`mvnw test` chạy đủ 12 kịch bản của đề**, gồm kiểm tra QR Type 04.
+Chuẩn bị một lần JAR của `qr-parser` gốc bằng cách chạy lệnh sau trong thư mục
+`qr-parser` chứa `pom.xml`:
+
+```powershell
+.\mvnw.cmd -DskipTests package
+```
+
+Quay về thư mục `qr-payment-flow`, chạy:
+
 ```powershell
 .\mvnw.cmd test
 ```
 
-```bash
-sh mvnw test
-```
+Trên Linux/macOS dùng `sh mvnw -DskipTests package` và `sh mvnw test` tương ứng.
+Test Type 04 tìm JAR tại `../qr-parser/target/qr-parser-0.0.1-SNAPSHOT.jar` hoặc
+`../qr-parser/qr-parser/target/qr-parser-0.0.1-SNAPSHOT.jar`, tự khởi động parser trên
+cổng cục bộ ngẫu nhiên và dừng sau khi kiểm tra. Nếu JAR ở nơi khác, truyền
+`-Dqr.parser.jar=<đường dẫn JAR>`. Nếu parser đã chạy sẵn, truyền
+`-Dqr.parser.url=http://localhost:8081`. Hai tham số này chỉ dùng khi kiểm thử.
 
-Test tự chọn profile `test`, dùng H2 memory riêng và fixed Clock khi kiểm thời gian.
-Không bọc test HTTP trong transaction. Test B2 có Gateway HTTP thật và proxy thử lỗi
-để kiểm mất response sau commit, lỗi lưu Merchant, response hỏng và concurrency.
-Kiểm tra qr-parser ngoài được tách thành
-`QrParserCompatibilityIT`, phải khởi động project gốc để chạy, không âm thầm skip.
-
-Kiểm tra Type04 bằng project gốc trong terminal khác, từ thư mục qr-parser chứa pom.xml:
+Để chạy thêm các bài restart B5/B6, kiểm tra ba tiến trình và đóng gói:
 
 ```powershell
-.\mvnw.cmd package
-java -jar target/qr-parser-0.0.1-SNAPSHOT.jar --server.port=8081
+.\mvnw.cmd -Pfull-suite verify
 ```
 
-Tại qr-payment-flow, chạy **toàn bộ B1–B8, Type04 và restart thật** bằng profile chuẩn:
+Trên Linux/macOS dùng `sh mvnw -Pfull-suite verify`.
+Test dùng H2 riêng và `Clock` cố định cho các tình huống cần thời gian xác định.
+Các test chạy tiến trình thật tạo cổng và file H2 riêng trong `target/`.
+Xem [bảng ánh xạ 12 kịch bản](docs/phase8-report.md#đủ-12-kịch-bản-bắt-buộc).
 
-```powershell
-.\mvnw.cmd -Pfull-suite "-Dqr.parser.url=http://localhost:8081" verify
-```
-
-Linux/macOS dùng `sh mvnw -Pfull-suite -Dqr.parser.url=http://localhost:8081 verify`.
-Dependency ngoài ứng dụng: JDK 21, Maven Central lần tải đầu, project qr-parser gốc
-đang chạy tại URL được chỉ định. Restart tests tự tạo process/port/H2 file trong target/.
-Không có parser thật thì full-suite thất bại; không dùng mock hoặc âm thầm skip.
-
-Kết quả thực tế ngày 2026-11-19 là **393 PASS, 0 FAIL, 0 errors, 0 skipped**.
-Bộ này gồm 377 test B1–B8, 9 test CSV, 6 test hoàn tiền và 1 test chạy ba JVM độc lập.
-`mvnw test` mặc định chọn 389 test. Profile full-suite thêm bốn lớp IT.
-`qr-parser`
-gốc trả HTTP 200, `status=VALID`, CRC VALID cho
-QR thực sự sinh bởi Gateway với `type="04"`. JAR đóng gói thành công. Đủ 12 kịch bản
-bắt buộc đã chạy, bảng ánh xạ test và kết quả ở [báo cáo B8](docs/phase8-report.md).
-
-Môi trường triển khai hiện tại giới hạn ghi ngoài workspace, nên lệnh kiểm chứng dùng
-cache cục bộ (không thay đổi cấu hình Maven của người dùng):
-
-```powershell
-$env:MAVEN_USER_HOME = Join-Path $PWD '.build\maven-user-home'
-.\mvnw.cmd -B "-Dmaven.repo.local=$PWD\.build\repository" test
-```
-
-Máy hiện tại lỗi TLS khi script PowerShell của Wrapper tải archive Maven; archive
-chính thức đã được tải bằng Python HTTPS, kiểm SHA-512 của Maven Central và SHA-256
-trong wrapper properties, rồi nạp vào cache cục bộ. Các lần test sau vẫn chạy qua
-`mvnw.cmd`; không tắt kiểm chứng TLS hoặc checksum, không sửa script Wrapper.
+Kết quả ngày 2026-11-25 trên H2: **390/390** test đạt với `mvnw test` và
+**393/393** với `mvnw -Pfull-suite verify`. Cả hai lượt đều chạy Type 04 với
+`qr-parser` gốc, không có test lỗi hay bị bỏ qua.
 
 ## Phạm vi còn lại
 

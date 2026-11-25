@@ -234,7 +234,7 @@ Tất cả các test dưới đây thực sự được chọn và PASS trong fu
 | # | Kịch bản đề | Test chứng minh chính | Trạng thái |
 |---|---|---|---|
 | 1 | B1→B8 U001, PAID, -55.000/+55.000, matched=1 | ReconciliationHttpIntegrationTest.scenario1FullB1ToB8FlowMatchesOneAndNeverMovesMoneyDuringReconciliation | PASS |
-| 2 | QR B2 đưa vào project gốc Type04 VALID | QrParserCompatibilityIT.originalQrParserAcceptsActualGatewayQrAsType04 | PASS |
+| 2 | QR B2 đưa vào project gốc Type04 VALID | QrParserCompatibilityTest.originalQrParserAcceptsActualGatewayQrAsType04 | PASS |
 | 3 | Sửa một ký tự tên Merchant, giữ CRC | WalletScanHttpIntegrationTest.wrongCrcDoesNotCallGateway | PASS |
 | 4 | Sửa amount thành 5000, tính lại CRC | WalletScanHttpIntegrationTest.changedAmountWithRecalculatedCrcIsRejected | PASS |
 | 5 | U002 thiếu tiền, FAILED/PAYMENT_FAILED, số dư không đổi | ReconciliationHttpIntegrationTest.failedPendingAndExpiredTransactionsNeverEnterSuccessReport; IpnIntegrationTest.failedIpnOmitsUnassignedFieldsAndMarksPaymentFailed | PASS |

@@ -3,15 +3,17 @@
 # Chế độ ba ứng dụng: Merchant cổng 8182, Wallet cổng 8183.
 @merchantUrl = http://localhost:8080
 @walletUrl = http://localhost:8080
-# Đặt ngày theo paidAt tại Việt Nam của lần chạy thực tế.
-@date = 2026-11-13
-# Đổi UUID khi bắt đầu một demo/đơn mới; giữ nguyên UUID nếu retry cùng lần thanh toán.
-@requestId = d98b842e-463f-4559-8997-dcce0d24bc41
+# Mặc định dùng ngày hiện tại tại Việt Nam. Đối soát ngày cũ thì điền ngày của paidAt.
+@date = {{$datetime "YYYY-MM-DD" 7 h}}
+# Lấy UUID từ lần tạo đơn để pay và retry luôn dùng cùng requestId.
+@requestId = {{createOrder.request.headers.X-Demo-Payment-Request-Id}}
 
 ### B1: tạo đơn CREATED; description <=19
+# REST Client dùng header demo để nhớ UUID cho đơn này.
 # @name createOrder
 POST {{merchantUrl}}/api/merchant/orders
 Content-Type: application/json
+X-Demo-Payment-Request-Id: {{$guid}}
 
 {"amount":55000,"description":"Ao thun"}
 
@@ -53,6 +55,7 @@ Content-Type: application/json
 {"date":"{{date}}"}
 
 ### Retry B4-B5 cùng UUID: tiền/ledger/bankRef không thay đổi
+# Giữ nguyên đơn và giao dịch hiện tại để thử gửi lại cùng UUID.
 # @name retryPayment
 POST {{walletUrl}}/api/wallet/payments
 Content-Type: application/json
