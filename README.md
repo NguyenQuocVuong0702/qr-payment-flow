@@ -21,7 +21,7 @@ vững, tra cứu/đồng bộ, hết hạn và đối soát cuối ngày. Đã 
 - [Báo cáo B7: tra cứu, hết hạn và audit](docs/phase7-report.md)
 - [Request B7](requests/b7.http)
 - [Báo cáo B8 và trạng thái 12 kịch bản bắt buộc](docs/phase8-report.md)
-- [Giải thích ngắn năm câu hỏi của đề](docs/phase8-report.md#giải-thích-ngắn-năm-câu-hỏi-của-đề)
+- [Bản trả lời năm câu hỏi](5_cau_hoi_dau_bai.docx), [giải thích trong báo cáo B8](docs/phase8-report.md#giải-thích-ngắn-năm-câu-hỏi-của-đề)
 - [Request B8](requests/b8.http), [demo HTTP toàn luồng B1–B8](requests/full-flow.http)
 
 ## Cấu trúc
